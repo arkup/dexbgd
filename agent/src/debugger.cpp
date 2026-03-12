@@ -4112,6 +4112,24 @@ static void DispatchGlobalCommand(jvmtiEnv* jvmti, JNIEnv* jni,
         CmdDisassemble(jvmti, jni, json);
     } else if (strcmp(cmd, "bp_set") == 0) {
         CmdBpSet(jvmti, jni, json);
+    } else if (strcmp(cmd, "bp_set_deopt") == 0) {
+        // Set breakpoint then force ART deoptimization via RetransformClasses.
+        // Workaround for repacked APKs where SetBreakpoint succeeds but
+        // OnBreakpoint never fires because ART doesn't deoptimize the method.
+        CmdBpSet(jvmti, jni, json);
+        char class_sig[256];
+        if (json_get_string(json, "class", class_sig, sizeof(class_sig))) {
+            jclass klass = FindClassBySig(jvmti, jni, class_sig);
+            if (klass) {
+                jvmtiError err = jvmti->RetransformClasses(1, &klass);
+                if (err == JVMTI_ERROR_NONE) {
+                    ALOGI("[DBG] bp_set_deopt: RetransformClasses(%s) OK - forced deopt", class_sig);
+                } else {
+                    ALOGW("[DBG] bp_set_deopt: RetransformClasses(%s) failed: err=%d", class_sig, (int)err);
+                }
+                jni->DeleteGlobalRef(klass);
+            }
+        }
     } else if (strcmp(cmd, "bp_clear") == 0) {
         CmdBpClear(jvmti, jni, json);
     } else if (strcmp(cmd, "bp_list") == 0) {

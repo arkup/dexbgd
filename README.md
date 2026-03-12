@@ -187,11 +187,14 @@ apk <path|pkg>          Load APK symbols
 ### Breakpoints
 ```
 bp <cls> <method> [sig] [@loc]   Set breakpoint
+bp2 <cls> <method> [sig] [@loc]  Set breakpoint + force deopt (for repacked APKs)
   --hits N / --every N / --when "expr"
 bc / bd <id>            Clear breakpoint
 bc / bd *               Clear all
 bl                      List breakpoints
 ```
+
+> **`bp2`**: On repacked APKs, ART may silently fail to deoptimize methods — `bp` succeeds but never fires. `bp2` forces deoptimization via `RetransformClasses` after setting the breakpoint. Use `bp2` instead of `bp` when debugging repacked apps.
 
 ### Execution
 ```
@@ -338,8 +341,25 @@ JVMTI requires `android:debuggable="true"`, which production apps omit. Two appr
 
 ### Option A: Repackage with apktool
 
-Works for most apps, but will be caught by signature verification.
+Works for most apps. Resigning breaks the original signature, so apps with signature verification will detect the modification. On repacked APKs, use `bp2` instead of `bp` if breakpoints set but never fire — see [Breakpoints](#breakpoints) for details.
 
+**Automated (recommended):**
+```bash
+# Build agent first
+cd agent && scripts/build.sh    # or build.bat on Windows
+
+# adb pull, patch, repack, and sign the APK
+python agent/scripts/repackage.py com.target.app
+# Follow the on-screen install command
+
+# Connect
+cd server && cargo run
+> launch com.target.app
+```
+
+The repackage script automates everything: pulls the APK (including splits) from the device, decodes with apktool, patches `android:debuggable="true"` and `android:extractNativeLibs="true"`, injects the agent `.so`, rebuilds, signs, and prints the install command. It also pauses after decoding so you can edit smali files before rebuild.
+
+**Manual steps (for reference):**
 1. `apktool d target.apk`
 2. Add `android:debuggable="true"` to `AndroidManifest.xml`
 3. Copy `libart_jit_tracer.so` into `target/lib/arm64-v8a/`

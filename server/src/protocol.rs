@@ -383,6 +383,19 @@ pub enum OutboundCommand {
         location: Option<i64>,
     },
 
+    /// Like BpSet but also calls RetransformClasses to force ART deoptimization.
+    /// Workaround for repacked APKs where SetBreakpoint succeeds but OnBreakpoint
+    /// never fires because ART fails to deoptimize the method.
+    #[serde(rename = "bp_set_deopt")]
+    BpSetDeopt {
+        class: String,
+        method: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        sig: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        location: Option<i64>,
+    },
+
     #[serde(rename = "bp_clear")]
     BpClear { id: i32 },
 

@@ -295,6 +295,7 @@ pub struct PendingBpResolve {
     pub sig: Option<String>,
     pub location: Option<i64>,
     pub cond: Option<BreakpointCondition>,
+    pub force_deopt: bool,
 }
 
 /// Context menu state for right-click popups.
@@ -864,12 +865,21 @@ impl App {
                             let resolved = matches[0].to_string();
                             self.log_debug(&format!("Resolved {} -> {}", pending.short_name, resolved));
                             self.pending_bp_cond = pending.cond;
-                            self.send_command(OutboundCommand::BpSet {
-                                class: resolved,
-                                method: pending.method,
-                                sig: pending.sig,
-                                location: pending.location,
-                            });
+                            if pending.force_deopt {
+                                self.send_command(OutboundCommand::BpSetDeopt {
+                                    class: resolved,
+                                    method: pending.method,
+                                    sig: pending.sig,
+                                    location: pending.location,
+                                });
+                            } else {
+                                self.send_command(OutboundCommand::BpSet {
+                                    class: resolved,
+                                    method: pending.method,
+                                    sig: pending.sig,
+                                    location: pending.location,
+                                });
+                            }
                         } else if matches.is_empty() {
                             self.log_error(&format!("No class found matching '{}'", pending.short_name));
                             self.log_info("Use full class name, e.g.: bp javax.crypto.Cipher init");
@@ -4462,6 +4472,35 @@ impl App {
         }
 
         // bp/break with possible condition flags (--hits, --every, --when)
+        if input.starts_with("bp2 ") {
+            let args = input.splitn(2, ' ').nth(1).unwrap_or("").trim();
+            match condition::parse_condition_flags(args) {
+                Ok((clean_args, cond)) => {
+                    let synthetic = format!("bp {}", clean_args);
+                    match commands::parse_command(&synthetic) {
+                        Ok(cmd) => {
+                            if self.state == AppState::Disconnected {
+                                self.log_error("Not connected. Use 'connect' first.");
+                                return;
+                            }
+                            // Convert BpSet -> BpSetDeopt
+                            let cmd = if let OutboundCommand::BpSet { class, method, sig, location } = cmd {
+                                OutboundCommand::BpSetDeopt { class, method, sig, location }
+                            } else { cmd };
+                            let cmd = self.resolve_bp_class(cmd, cond.clone());
+                            if let Some(cmd) = cmd {
+                                self.pending_bp_cond = cond;
+                                self.send_command(cmd);
+                            }
+                        }
+                        Err(e) => self.log_error(&e),
+                    }
+                }
+                Err(e) => self.log_error(&format!("condition parse error: {}", e)),
+            }
+            return;
+        }
+
         if input.starts_with("bp ") || input.starts_with("break ") {
             let args = input.splitn(2, ' ').nth(1).unwrap_or("").trim();
             match condition::parse_condition_flags(args) {
@@ -5267,7 +5306,14 @@ impl App {
     /// 2. Fall back to agent `cls` query (capped at 150 results)
     /// Returns None if resolution is pending (async), Some(cmd) if resolved or full name.
     fn resolve_bp_class(&mut self, cmd: OutboundCommand, cond: Option<BreakpointCondition>) -> Option<OutboundCommand> {
-        if let OutboundCommand::BpSet { ref class, ref method, ref sig, ref location } = cmd {
+        // Extract fields from BpSet or BpSetDeopt
+        let is_deopt = matches!(cmd, OutboundCommand::BpSetDeopt { .. });
+        let bp_fields = match cmd {
+            OutboundCommand::BpSet { ref class, ref method, ref sig, ref location } => Some((class, method, sig, location)),
+            OutboundCommand::BpSetDeopt { ref class, ref method, ref sig, ref location } => Some((class, method, sig, location)),
+            _ => None,
+        };
+        if let Some((class, method, sig, location)) = bp_fields {
             let inner = class.strip_prefix('L').unwrap_or(class);
             let inner = inner.strip_suffix(';').unwrap_or(inner);
             if !inner.contains('/') && !inner.contains('.') {
@@ -5290,11 +5336,20 @@ impl App {
                     let resolved = matches.into_iter().next().unwrap();
                     self.log_debug(&format!("Resolved {} -> {} (from DEX)", inner, resolved));
                     self.pending_bp_cond = cond;
-                    return Some(OutboundCommand::BpSet {
-                        class: resolved,
-                        method: method.clone(),
-                        sig: sig.clone(),
-                        location: *location,
+                    return Some(if is_deopt {
+                        OutboundCommand::BpSetDeopt {
+                            class: resolved,
+                            method: method.clone(),
+                            sig: sig.clone(),
+                            location: *location,
+                        }
+                    } else {
+                        OutboundCommand::BpSet {
+                            class: resolved,
+                            method: method.clone(),
+                            sig: sig.clone(),
+                            location: *location,
+                        }
                     });
                 } else if matches.len() > 1 {
                     self.log_error(&format!("Ambiguous class '{}'  - {} matches:", inner, matches.len()));
@@ -5316,6 +5371,7 @@ impl App {
                     sig: sig.clone(),
                     location: *location,
                     cond,
+                    force_deopt: is_deopt,
                 });
                 self.cls_auto_pending = true;
                 self.log_debug(&format!("Resolving class '{}' via agent...", inner));
@@ -5350,6 +5406,7 @@ impl App {
         self.log_info("  threads         - List all threads");
         self.log_info("  dis/u <cls> <m> - Disassemble method (cls = partial name ok)");
         self.log_info("  bp <cls> <m>    - Set breakpoint");
+        self.log_info("  bp2 <cls> <m>   - Set breakpoint + force deopt (for repacked APKs)");
         self.log_info("    --hits N      - Break on Nth hit only");
         self.log_info("    --every N     - Break every Nth hit");
         self.log_info("    --when \"expr\"  - Break when condition is true (e.g. name == \"AES\")");
