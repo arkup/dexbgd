@@ -4058,7 +4058,7 @@ impl App {
                 self.do_disconnect();
                 return;
             }
-            "quit" | "q" => {
+            "quit" | "q" | "exit" => {
                 self.running = false;
                 return;
             }
@@ -4575,6 +4575,23 @@ impl App {
                 }
                 return;
             }
+        }
+
+        // Gate release: set BP on GateWait.gateReleased then delete the gate file
+        if input == "gate" {
+            if self.state == AppState::Disconnected {
+                self.log_error("Not connected.");
+                return;
+            }
+            self.send_command(OutboundCommand::BpSet {
+                class: "Lcom/dexbgd/GateWait;".to_string(),
+                method: "gateReleased".to_string(),
+                sig: Some("()V".to_string()),
+                location: None,
+            });
+            self.send_command(OutboundCommand::GateRelease {});
+            self.log_info("[gate] BP set on GateWait.gateReleased -- gate file deleted, app will resume");
+            return;
         }
 
         // Parse as agent command
@@ -5398,6 +5415,7 @@ impl App {
         self.log_info("  procs           - List running app processes");
         self.log_info("  attach <pkg>    - Inject agent + forward + connect + load APK");
         self.log_info("  launch <pkg>    - Start app + attach (one shot)");
+        self.log_info("  gate            - Release early-attach gate (requires --gate repackage)");
         self.log_info("  connect         - Connect to agent (127.0.0.1:12345)");
         self.log_info("  disconnect      - Disconnect");
         self.log_info("  cls [pattern]   - List loaded classes");
@@ -5473,7 +5491,7 @@ impl App {
         self.log_info("  ai cancel       - Cancel running AI analysis");
         self.log_info("  ai --ollama <p>  - Force Ollama backend");
         self.log_info("  ai --model X <p>  - Override model");
-        self.log_info("  quit            - Exit");
+        self.log_info("  quit / exit / q - Exit");
         self.log_info("Keys: q=quit, Tab=cycle tabs, Esc=panels/back, Left/Right=focus, Up/Down=cursor");
         self.log_info("  F1=connect, F2=toggle BP at cursor, Shift-F10=record, F12=toggle mouse");
         self.log_info("  Ctrl+T=cycle color theme");
@@ -6818,10 +6836,12 @@ impl App {
     // -------------------------------------------------------------------
 
     fn log_entry(&mut self, level: LogLevel, text: &str) {
-        self.log.push(LogEntry {
-            level,
-            text: text.to_string(),
-        });
+        for line in text.lines() {
+            self.log.push(LogEntry {
+                level: level.clone(),
+                text: line.to_string(),
+            });
+        }
         if self.log.len() > MAX_LOG_ENTRIES {
             self.log.drain(0..self.log.len() - MAX_LOG_ENTRIES);
         }

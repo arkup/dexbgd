@@ -2,6 +2,9 @@
 agent/build/
 agent/injector/build/
 
+# Tools
+agent/scripts/apktool.jar
+
 # Rust server build
 server/target/
 

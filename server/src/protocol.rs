@@ -492,6 +492,9 @@ pub enum OutboundCommand {
     #[serde(rename = "record_stop")]
     RecordStop {},
 
+    #[serde(rename = "gate_release")]
+    GateRelease {},
+
     #[serde(rename = "redefine_class")]
     RedefineClass {
         class_sig: String,

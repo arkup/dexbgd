@@ -4093,6 +4093,29 @@ static void CmdRedefineClass(jvmtiEnv* jvmti, JNIEnv* jni, const char* json) {
 }
 
 // ---------------------------------------------------------------------------
+// Early-attach gate release — delete the gate file so the smali wait loop exits
+// ---------------------------------------------------------------------------
+
+static void CmdGateRelease(jvmtiEnv* jvmti, JNIEnv* jni, const char*) {
+    // Use FindClassBySig (JVMTI-based) -- jni->FindClass won't find app classes
+    // from the native socket recv thread (wrong classloader).
+    jclass klass = FindClassBySig(jvmti, jni, "Lcom/dexbgd/GateWait;");
+    if (!klass) {
+        ALOGW("[DBG] gate_release: GateWait class not found (--gate not used?)");
+        return;
+    }
+    jfieldID fid = jni->GetStaticFieldID(klass, "released", "Z");
+    if (fid) {
+        jni->SetStaticBooleanField(klass, fid, JNI_TRUE);
+        ALOGI("[DBG] gate_release: GateWait.released = true");
+    } else {
+        jni->ExceptionClear();
+        ALOGW("[DBG] gate_release: GateWait.released field not found");
+    }
+    jni->DeleteGlobalRef(klass);
+}
+
+// ---------------------------------------------------------------------------
 // Command dispatch — called from socket recv thread
 // ---------------------------------------------------------------------------
 
@@ -4150,6 +4173,8 @@ static void DispatchGlobalCommand(jvmtiEnv* jvmti, JNIEnv* jni,
         CmdRecordStop(jvmti, jni, json);
     } else if (strcmp(cmd, "redefine_class") == 0) {
         CmdRedefineClass(jvmti, jni, json);
+    } else if (strcmp(cmd, "gate_release") == 0) {
+        CmdGateRelease(jvmti, jni, json);
     } else {
         SendError("unknown cmd: %s", cmd);
     }
