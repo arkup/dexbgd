@@ -175,6 +175,49 @@ pub fn patch_goto(
     Ok(out)
 }
 
+/// Force a conditional branch at `bci` to always be taken or always not taken
+/// by inverting its opcode (XOR 1). Covers opcodes 0x32–0x3d (if-eq..if-lez).
+///
+/// Opcode inversion pairs (all differ by XOR 1):
+///   if-eq↔if-ne, if-lt↔if-ge, if-gt↔if-le
+///   if-eqz↔if-nez, if-ltz↔if-gez, if-gtz↔if-lez
+///
+/// Only the opcode byte changes — size, registers, and target offset are
+/// unchanged — so ART's verifier accepts the result with no issues.
+pub fn patch_branch_force(
+    dex: &[u8],
+    class_sig: &str,
+    method_name: &str,
+    bci: u32,
+) -> Result<Vec<u8>, PatchError> {
+    let mut out = dex.to_vec();
+
+    let code_off = find_code_item_off(&out, class_sig, method_name)?;
+    if code_off + 16 > out.len() {
+        return Err(PatchError::Truncated("code_item header"));
+    }
+    let insns_size = r32(&out, code_off + 12);
+    if bci >= insns_size {
+        return Err(PatchError::PayloadTooLarge { need: bci as usize + 1, have: insns_size as usize });
+    }
+    let insns_base = code_off + 16;
+    let byte_off = insns_base + bci as usize * 2;
+    if byte_off >= out.len() {
+        return Err(PatchError::Truncated("insns opcode byte"));
+    }
+
+    let op = out[byte_off];
+    if op < 0x32 || op > 0x3d {
+        return Err(PatchError::UnknownValue(format!("opcode 0x{:02x} is not a conditional branch", op)));
+    }
+    out[byte_off] = op ^ 1;
+
+    narrow_to_single_class(&mut out, class_sig)?;
+    zero_inter_section_padding(&mut out);
+    fix_checksums(&mut out);
+    Ok(out)
+}
+
 /// Width of a Dalvik instruction in code units, derived from the opcode byte only.
 /// Handles the special NOP pseudo-instructions (switch/fill-array payloads) via the
 /// full 16-bit identifier word.

@@ -1042,9 +1042,9 @@ impl App {
                     let (_, _, _, cond) = self.redefine_restore.remove(pos);
                     if let Some(c) = cond {
                         self.bp_manager.set_condition(id, c.clone());
-                        self.log_info(&format!("Breakpoint #{} restored: {}.{} @{} [{}]", id, cls, method, location, c));
+                        self.log_info(&format!("Breakpoint #{} restored: {}.{} @{:04x} [{}]", id, cls, method, location, c));
                     } else {
-                        self.log_info(&format!("Breakpoint #{} restored after patch: {}.{} @{}", id, cls, method, location));
+                        self.log_info(&format!("Breakpoint #{} restored after patch: {}.{} @{:04x}", id, cls, method, location));
                     }
                 } else {
                     if was_deferred {
@@ -3236,8 +3236,21 @@ impl App {
                     let from_bci = from_loc as u32;
                     let to_bci = instr.offset;
                     if to_bci > from_bci {
-                        items.push(sep);
+                        items.push(sep.clone());
                         items.push(format!("  Nop {:04x}..{:04x}  ", from_bci, to_bci));
+                    }
+                }
+            }
+        }
+
+        // Add "Branch taken/not taken" patch when cursor is on a conditional jump
+        if let Some(cur_idx) = self.bytecodes_cursor {
+            if let Some(instr) = self.bytecodes.get(cur_idx) {
+                if let Some(ref meta) = instr.branch {
+                    if meta.cond != disassembler::BranchCond::Always {
+                        items.push(sep);
+                        items.push(format!("  Branch taken >{:04x}  ", meta.target));
+                        items.push("  Branch not taken  ".into());
                     }
                 }
             }
@@ -3283,10 +3296,17 @@ impl App {
                 self.command_focused = true;
             }
             _ => {
-                // "Nop range" item (conditionally appended by open_patch_submenu)
-                if menu.items.get(item_idx).map(|s| s.trim_start().starts_with("Nop ")).unwrap_or(false) {
+                let label = menu.items.get(item_idx).map(|s| s.trim()).unwrap_or("");
+                if label.starts_with("Nop ") {
                     if let Some(instr) = self.bytecodes.get(menu.line_idx) {
                         self.do_nop_range_patch(instr.offset);
+                    }
+                } else if label.starts_with("Branch taken") || label == "Branch not taken" {
+                    let taken = label.starts_with("Branch taken");
+                    if let Some(instr) = self.bytecodes.get(menu.line_idx) {
+                        if instr.branch.is_some() {
+                            self.do_patch_branch_force(instr.offset, taken);
+                        }
                     }
                 }
             }
@@ -5045,6 +5065,46 @@ impl App {
             }
             Err(e) => {
                 self.log_error(&format!("[NOP RANGE] {}", e));
+            }
+        }
+    }
+
+    /// Permanently patch a conditional branch to always be taken or not taken.
+    /// Uses RedefineClasses; takes effect at next method entry.
+    fn do_patch_branch_force(&mut self, bci: u32, taken: bool) {
+        let class_sig = match &self.current_class {
+            Some(c) => c.clone(),
+            None => { self.log_error("patch branch: no class loaded"); return; }
+        };
+        let method_name = match &self.current_method {
+            Some(m) => m.clone(),
+            None => { self.log_error("patch branch: no method loaded"); return; }
+        };
+        let raw_bytes = match self.dex_data.iter().find(|d| d.has_class(&class_sig)) {
+            Some(d) => d.raw.clone(),
+            None => { self.log_error("patch branch: DEX not loaded"); return; }
+        };
+        match crate::dex_patcher::patch_branch_force(&raw_bytes, &class_sig, &method_name, bci) {
+            Ok(patched) => {
+                let (stored, computed) = crate::dex_patcher::check_adler32(&patched);
+                if stored != computed {
+                    self.log_error("[PATCH BRANCH] adler32 mismatch - aborting");
+                    return;
+                }
+                let dex_b64 = BASE64.encode(&patched);
+                self.log_info(&format!(
+                    "[PATCH BRANCH] @{:04x}: opcode inverted => {} (permanent) - redefining class...",
+                    bci, if taken { "forced taken" } else { "forced not taken" }
+                ));
+                self.log_info("[PATCH BRANCH] takes effect at next method entry");
+                self.send_command(crate::protocol::OutboundCommand::RedefineClass {
+                    class_sig,
+                    dex_b64,
+                    return_value: None,
+                });
+            }
+            Err(e) => {
+                self.log_error(&format!("[PATCH BRANCH] {}", e));
             }
         }
     }

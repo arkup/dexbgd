@@ -432,6 +432,24 @@ cd server && cargo run
 
 The repackage script automates everything: pulls the APK (including splits) from the device, decodes with apktool, patches `android:debuggable="true"` and `android:extractNativeLibs="true"`, injects the agent `.so`, rebuilds, signs, and prints the install command. It also pauses after decoding so you can edit smali files before rebuild.
 
+**Early-attach with `--gate` (inspect code before `onCreate` runs):**
+
+```bash
+python agent/scripts/repackage.py --gate com.target.app
+# Follow the on-screen install command
+
+cd server && cargo run
+> launch com.target.app
+```
+
+The `--gate` flag injects a spin-loop into the main Activity's `onCreate` so the app pauses at startup waiting for the server. Once connected, type:
+
+```
+> gate
+```
+
+This sets a breakpoint at `GateWait.gateReleased` and releases the gate — the app resumes and breaks immediately, letting you step from the very first lines of `onCreate`.
+
 **Manual steps (for reference):**
 1. `apktool d target.apk`
 2. Add `android:debuggable="true"` to `AndroidManifest.xml`

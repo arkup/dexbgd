@@ -33,7 +33,7 @@ pub struct Config {
     pub split_h: f32,
     pub split_v: f32,
     pub split_right_v: f32,
-    /// Last up to 6 saved commands (seeded into command_history on startup).
+    /// Last up to 15 saved commands (seeded into command_history on startup).
     pub history: Vec<String>,
 }
 
@@ -232,12 +232,12 @@ impl Config {
         out.push_str(&format!("split_right_v={:.3}\n", split_right_v));
 
         out.push_str("\n[history]\n");
-        // Take last 6, most-recent last; skip `ss` / `save settings` itself.
+        // Take last 15, most-recent last; skip `ss` / `save settings` itself.
         let saved: Vec<&str> = history
             .iter()
             .rev()
             .filter(|s| !matches!(s.as_str(), "ss" | "save settings"))
-            .take(6)
+            .take(15)
             .collect::<Vec<_>>()
             .into_iter()
             .rev()
