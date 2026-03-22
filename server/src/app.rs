@@ -4428,6 +4428,10 @@ impl App {
                 self.do_disconnect();
                 return;
             }
+            "kill" => {
+                self.do_kill();
+                return;
+            }
             "quit" | "q" | "exit" => {
                 self.running = false;
                 return;
@@ -5594,6 +5598,27 @@ impl App {
             Ok(path) => self.log_info(&format!("Settings saved to {}", path.display())),
             Err(e) => self.log_error(&format!("Save settings failed: {}", e)),
         }
+    }
+
+    fn do_kill(&mut self) {
+        let pkg = match self.current_package.clone() {
+            Some(p) => p,
+            None => {
+                self.log_error("No package connected");
+                return;
+            }
+        };
+        self.log_info(&format!("Killing {}...", pkg));
+        match std::process::Command::new("adb")
+            .args(["shell", "am", "force-stop", &pkg])
+            .output()
+        {
+            Ok(_) => self.log_info("App terminated"),
+            Err(e) => self.log_error(&format!("adb failed: {}", e)),
+        }
+        // Disconnect will happen automatically when the socket closes,
+        // but call it now to update state immediately.
+        self.do_disconnect();
     }
 
     fn do_disconnect(&mut self) {
