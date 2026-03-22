@@ -9,7 +9,7 @@ A real debugger for Android apps. Not a hooking framework, not JDWP - a native J
 Built for CTF, malware analysis and reverse engineering. Thin C++ agent inside the app, Rust TUI on the host.
 
 <p align="center">
-  <img src="img/screenshot1.png" alt="BGD Screenshot">
+  <img src="img/demo.gif" alt="BGD Screenshot">
 </p>
 
 ## How It Differs from Frida?
