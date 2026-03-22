@@ -538,13 +538,16 @@ pub enum OutboundCommand {
     #[serde(rename = "gate_release")]
     GateRelease {},
 
-    /// Set a Dalvik register (slot) to an integer value.
+    /// Set a Dalvik register (slot) to a value.
     /// slot is the raw Dalvik register number (vN = slot N).
-    /// value is sign-extended to jint by the agent.
+    /// type_hint: JNI type char: I/Z/B/S/C = int, J = long, F = float, D = double.
+    /// Defaults to int if absent or unrecognized.
     #[serde(rename = "set_local")]
     SetLocal {
         slot: i32,
         value: i64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        type_hint: Option<String>,
     },
 
     #[serde(rename = "redefine_class")]

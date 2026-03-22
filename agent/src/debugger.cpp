@@ -1247,11 +1247,17 @@ static void CmdLocals(jvmtiEnv* jvmti, JNIEnv* jni, jthread thread,
 
     if (have_table && var_table) {
         // Use debug info
+        // Track which slots have a live (non-stale) variable table entry so we
+        // can emit uncovered slots below (temp registers like const/4 v1 targets).
+        std::vector<bool> slot_covered(max_locals, false);
+
         for (int i = 0; i < var_count; i++) {
             jvmtiLocalVariableEntry& v = var_table[i];
             // Check if variable is live at current location
             bool stale = (location < v.start_location ||
                           location >= v.start_location + v.length);
+            if (!stale && v.slot >= 0 && v.slot < max_locals)
+                slot_covered[v.slot] = true;
 
             JsonBuf obj;
             json_start(&obj);
@@ -1314,6 +1320,27 @@ static void CmdLocals(jvmtiEnv* jvmti, JNIEnv* jni, jthread thread,
             if (v.generic_signature) jvmti->Deallocate(reinterpret_cast<unsigned char*>(v.generic_signature));
         }
         jvmti->Deallocate(reinterpret_cast<unsigned char*>(var_table));
+
+        // Emit uncovered slots (temp registers with no debug-info entry at this PC)
+        for (int slot = 0; slot < max_locals; slot++) {
+            if (slot_covered[slot]) continue;
+            char slot_name[16];
+            snprintf(slot_name, sizeof(slot_name), "v%d", slot);
+            char value_str[64] = "";
+            jint ival = 0;
+            if (jvmti->GetLocalInt(thread, 0, slot, &ival) == JVMTI_ERROR_NONE)
+                snprintf(value_str, sizeof(value_str), "%d (0x%x)", ival, (unsigned)ival);
+            JsonBuf obj;
+            json_start(&obj);
+            json_add_int(&obj, "slot", slot);
+            json_add_string(&obj, "name", slot_name);
+            json_add_string(&obj, "type", "?");
+            json_add_string(&obj, "value", value_str[0] ? value_str : "<unavailable>");
+            json_end(&obj);
+            obj.buf[obj.pos - 1] = '\0';
+            obj.pos -= 1;
+            json_array_add_object(&ab, obj.buf);
+        }
     } else {
         // Fallback: no debug info, dump raw register values
         for (int slot = 0; slot < max_locals; slot++) {
@@ -3170,11 +3197,31 @@ void DebuggerCommandLoop(jvmtiEnv* jvmti, JNIEnv* jni, jthread thread,
         } else if (strcmp(dcmd.cmd, "set_local") == 0) {
             int slot = 0;
             long long value = 0;
+            char type_hint[4] = "I";
             json_get_int(dcmd.raw, "slot", &slot);
             json_get_long(dcmd.raw, "value", &value);
-            jvmtiError err = jvmti->SetLocalInt(thread, 0, slot, (jint)value);
-            if (err != JVMTI_ERROR_NONE) {
-                SendError("SetLocalInt failed (err=%d, slot=%d)", err, slot);
+            json_get_string(dcmd.raw, "type_hint", type_hint, sizeof(type_hint));
+            jvmtiError err;
+            if (type_hint[0] == 'J') {
+                err = jvmti->SetLocalLong(thread, 0, slot, (jlong)value);
+                if (err != JVMTI_ERROR_NONE)
+                    SendError("SetLocalLong failed (err=%d, slot=%d)", err, slot);
+            } else if (type_hint[0] == 'F') {
+                float fval;
+                memcpy(&fval, &value, sizeof(float));
+                err = jvmti->SetLocalFloat(thread, 0, slot, fval);
+                if (err != JVMTI_ERROR_NONE)
+                    SendError("SetLocalFloat failed (err=%d, slot=%d)", err, slot);
+            } else if (type_hint[0] == 'D') {
+                double dval;
+                memcpy(&dval, &value, sizeof(double));
+                err = jvmti->SetLocalDouble(thread, 0, slot, dval);
+                if (err != JVMTI_ERROR_NONE)
+                    SendError("SetLocalDouble failed (err=%d, slot=%d)", err, slot);
+            } else {
+                err = jvmti->SetLocalInt(thread, 0, slot, (jint)value);
+                if (err != JVMTI_ERROR_NONE)
+                    SendError("SetLocalInt failed (err=%d, slot=%d)", err, slot);
             }
 
         } else if (strcmp(dcmd.cmd, "stack") == 0) {

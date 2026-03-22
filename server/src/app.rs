@@ -2627,6 +2627,14 @@ impl App {
                         if let Some(label) = ascii_label {
                             locals_items.push(label);
                         }
+                        // Show Set Value only for primitive types (not objects/arrays/strings)
+                        let can_set = matches!(self.state, AppState::Suspended | AppState::Stepping)
+                            && self.get_local_at_line(line_idx)
+                                .map(|v| is_primitive_type(&v.var_type))
+                                .unwrap_or(false);
+                        if can_set {
+                            locals_items.push("  Set Value    ".into());
+                        }
 
                         self.context_menu = Some(ContextMenu {
                             x: col,
@@ -3183,7 +3191,7 @@ impl App {
                 if let Some(instr) = self.bytecodes.get(menu.line_idx) {
                     if let Some((slot, taken_val, not_taken_val, _)) = parse_cond_jump(&instr.text) {
                         let value = if taken { taken_val } else { not_taken_val };
-                        self.send_command(OutboundCommand::SetLocal { slot, value });
+                        self.send_command(OutboundCommand::SetLocal { slot, value, type_hint: Some("I".into()) });
                         self.send_command(OutboundCommand::Regs {});
                         self.log_info(&format!(
                             "Set v{} = {} => jump {}",
@@ -3461,6 +3469,12 @@ impl App {
     }
 
     fn handle_locals_context_menu(&mut self, item_idx: usize, menu: &ContextMenu) {
+        // Match by label for the last items so ascii_label offset doesn't break things
+        let label = menu.items.get(item_idx).map(|s| s.trim()).unwrap_or("");
+        if label == "Set Value" {
+            self.open_setreg_for_line(menu.line_idx);
+            return;
+        }
         match item_idx {
             0 => {
                 // Copy Line
@@ -3491,15 +3505,36 @@ impl App {
             }
             3 => {
                 // Copy full ASCII decode from raw value (not dependent on click column)
-                if menu.items.len() > 3 {
-                    if let Some(l) = self.locals.get(menu.line_idx) {
-                        if let Some(ascii) = find_hex_ascii_in(&l.value) {
-                            copy_to_clipboard(&ascii);
-                        }
+                if let Some(l) = self.locals.get(menu.line_idx) {
+                    if let Some(ascii) = find_hex_ascii_in(&l.value) {
+                        copy_to_clipboard(&ascii);
                     }
                 }
             }
             _ => {}
+        }
+    }
+
+    /// Get the LocalVar at the given display line index, accounting for Locals vs Registers sort.
+    fn get_local_at_line(&self, line_idx: usize) -> Option<&crate::protocol::LocalVar> {
+        match self.locals_tab {
+            LocalsTab::Locals => self.locals.get(line_idx),
+            LocalsTab::Registers => {
+                let mut sorted: Vec<_> = self.locals.iter().collect();
+                sorted.sort_by_key(|v| v.slot);
+                sorted.into_iter().nth(line_idx)
+            }
+        }
+    }
+
+    /// Pre-fill the command bar with "setreg vN " for the local at display line_idx.
+    fn open_setreg_for_line(&mut self, line_idx: usize) {
+        if let Some(var) = self.get_local_at_line(line_idx) {
+            let slot = var.slot;
+            self.command_input = format!("setreg v{} ", slot);
+            self.command_cursor = self.command_input.len();
+            self.focus = 4;
+            self.command_focused = true;
         }
     }
 
@@ -4501,6 +4536,13 @@ impl App {
         if input.starts_with("r ") || input.starts_with("regs ") {
             let arg = input.splitn(2, ' ').nth(1).unwrap_or("").trim();
             self.do_log_reg(arg);
+            return;
+        }
+
+        // setreg vN VALUE  — set Dalvik register vN to integer/long value while suspended
+        if input.starts_with("setreg ") || input.starts_with("sr ") {
+            let rest = input.splitn(2, ' ').nth(1).unwrap_or("").trim();
+            self.do_setreg(rest);
             return;
         }
 
@@ -5636,6 +5678,64 @@ impl App {
             Ok(path) => self.log_info(&format!("Settings saved to {}", path.display())),
             Err(e) => self.log_error(&format!("Save settings failed: {}", e)),
         }
+    }
+
+    /// setreg vN VALUE — set Dalvik register vN to a value while suspended.
+    /// Looks up the register's type from the current locals to determine the JVMTI call.
+    fn do_setreg(&mut self, rest: &str) {
+        // Parse: vN VALUE  (e.g. "v0 42" or "v3 -1")
+        let parts: Vec<&str> = rest.splitn(2, ' ').collect();
+        if parts.len() != 2 {
+            self.log_error("Usage: setreg vN VALUE (e.g. setreg v0 42)");
+            return;
+        }
+        let reg_str = parts[0].trim();
+        let val_str = parts[1].trim();
+        let slot: i32 = if let Some(n) = reg_str.strip_prefix('v') {
+            match n.parse::<i32>() {
+                Ok(v) => v,
+                Err(_) => { self.log_error("Usage: setreg vN VALUE (e.g. setreg v0 42)"); return; }
+            }
+        } else {
+            self.log_error("Usage: setreg vN VALUE (e.g. setreg v0 42)");
+            return;
+        };
+        let value: i64 = match val_str.parse::<i64>() {
+            Ok(v) => v,
+            Err(_) => {
+                // Try hex (0x...)
+                if let Some(hex) = val_str.strip_prefix("0x").or_else(|| val_str.strip_prefix("0X")) {
+                    match i64::from_str_radix(hex, 16) {
+                        Ok(v) => v,
+                        Err(_) => { self.log_error(&format!("Invalid value: {}", val_str)); return; }
+                    }
+                } else {
+                    self.log_error(&format!("Invalid value: {}", val_str));
+                    return;
+                }
+            }
+        };
+        if !matches!(self.state, AppState::Suspended | AppState::Stepping) {
+            self.log_error("Not suspended - setreg only works while at a breakpoint or step");
+            return;
+        }
+        // Look up type hint from locals
+        let type_hint = self.locals.iter()
+            .find(|v| v.slot == slot)
+            .map(|v| {
+                match v.var_type.as_str() {
+                    "long" | "J"  => "J",
+                    "float" | "F" => "F",
+                    "double" | "D" => "D",
+                    _ => "I",
+                }
+            })
+            .unwrap_or("I")
+            .to_string();
+        self.log_info(&format!("setreg v{} = {} (type {})", slot, value, type_hint));
+        self.send_command(OutboundCommand::SetLocal { slot, value, type_hint: Some(type_hint) });
+        self.send_command(OutboundCommand::Locals {});
+        self.send_command(OutboundCommand::Regs {});
     }
 
     fn do_kill(&mut self) {
@@ -7965,6 +8065,13 @@ fn split_long_line(line: &str, max_width: usize) -> Vec<String> {
 /// Extract the word at a given column position in a string.
 /// A "word" is a contiguous sequence of non-whitespace, non-comma characters.
 /// For quoted strings, the entire quoted portion (including quotes) is returned.
+/// Returns true if a JNI type signature represents a primitive we can set via setreg.
+/// '?' is the fallback type for uncovered slots (treated as int).
+fn is_primitive_type(var_type: &str) -> bool {
+    matches!(var_type.chars().next(),
+        Some('I' | 'J' | 'F' | 'D' | 'Z' | 'B' | 'S' | 'C' | '?'))
+}
+
 fn word_at_col<'a>(line: &'a str, col: usize) -> Option<&'a str> {
     if col >= line.len() {
         return None;
