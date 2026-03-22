@@ -535,6 +535,9 @@ pub struct App {
     pub cap_frame_pop: bool,
     pub cap_redefine_classes: bool,
 
+    /// When true, F9/sout/finish use sout2 instead of single-step step-out.
+    pub use_sout2: bool,
+
     // Color theme (Ctrl+T to cycle)
     pub theme: Theme,
     pub theme_index: usize,
@@ -712,6 +715,7 @@ impl App {
             cap_pop_frame: false,
             cap_frame_pop: false,
             cap_redefine_classes: false,
+            use_sout2: false,
             theme_index: config.theme_index.min(crate::theme::builtin_themes().len().saturating_sub(1)),
             themes: crate::theme::builtin_themes(),
             theme: {
@@ -3638,7 +3642,7 @@ impl App {
             StatusBarAction::Pause => self.execute_command("pause"),
             StatusBarAction::StepIn => self.execute_command("si"),
             StatusBarAction::StepOver => self.execute_command("s"),
-            StatusBarAction::StepOut => self.execute_command("sout"),
+            StatusBarAction::StepOut => { let cmd = self.sout_cmd(); self.execute_command(cmd); }
             StatusBarAction::Rec => self.execute_command("record"),
             StatusBarAction::Quit => { self.running = false; }
         }
@@ -3976,7 +3980,7 @@ impl App {
             KeyCode::F(5) => self.execute_command("c"),
             KeyCode::F(7) => self.execute_command("si"),
             KeyCode::F(8) => self.execute_command("s"),
-            KeyCode::F(9) => self.execute_command("sout"),
+            KeyCode::F(9) => { let cmd = self.sout_cmd(); self.execute_command(cmd); }
             _ => {}
         }
     }
@@ -4360,7 +4364,7 @@ impl App {
             KeyCode::F(5) => self.execute_command("c"),
             KeyCode::F(7) => self.execute_command("si"),
             KeyCode::F(8) => self.execute_command("s"),
-            KeyCode::F(9) => self.execute_command("sout"),
+            KeyCode::F(9) => { let cmd = self.sout_cmd(); self.execute_command(cmd); }
             KeyCode::Esc => {
                 // Esc in bytecodes panel with nav history: go back
                 if self.focus == 0 && self.left_tab == LeftTab::Bytecodes && !self.nav_stack.is_empty() {
@@ -4449,6 +4453,16 @@ impl App {
             }
             "kill" => {
                 self.do_kill();
+                return;
+            }
+            "use sout2" => {
+                self.use_sout2 = true;
+                self.log_info("sout2 enabled: F9/sout now uses FramePop step-out");
+                return;
+            }
+            "use sout" => {
+                self.use_sout2 = false;
+                self.log_info("sout2 disabled: F9/sout uses single-step step-out");
                 return;
             }
             "quit" | "q" | "exit" => {
@@ -5550,6 +5564,10 @@ impl App {
             // APK not loaded yet — defer until do_load_apk finishes
             self.session_startup_queue = cmds;
         }
+    }
+
+    fn sout_cmd(&self) -> &'static str {
+        if self.use_sout2 && self.cap_frame_pop { "sout2" } else { "sout" }
     }
 
     fn run_startup_commands(&mut self, cmds: Vec<String>) {

@@ -1,5 +1,7 @@
 use std::path::PathBuf;
 
+const HISTORY_MAX: usize = 15;
+
 #[derive(Debug, Clone)]
 pub struct AiConfig {
     pub backend: String,       // "claude" or "ollama"
@@ -33,7 +35,7 @@ pub struct Config {
     pub split_h: f32,
     pub split_v: f32,
     pub split_right_v: f32,
-    /// Last up to 15 saved commands (seeded into command_history on startup).
+    /// Last up to HISTORY_MAX saved commands (seeded into command_history on startup).
     pub history: Vec<String>,
 }
 
@@ -168,7 +170,7 @@ impl Config {
                 Some(v) if !v.is_empty() => {
                     cfg.history.push(v.clone());
                     i += 1;
-                    if i >= 6 {
+                    if i >= HISTORY_MAX {
                         break;
                     }
                 }
@@ -237,7 +239,7 @@ impl Config {
             .iter()
             .rev()
             .filter(|s| !matches!(s.as_str(), "ss" | "save settings"))
-            .take(15)
+            .take(HISTORY_MAX)
             .collect::<Vec<_>>()
             .into_iter()
             .rev()
