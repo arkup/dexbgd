@@ -29,6 +29,9 @@ pub struct Session {
     pub hooks: Vec<HookRule>,
     #[serde(default)]
     pub bookmarks: Vec<SessionBookmark>,
+    /// Commands to run automatically on session load (e.g. "anti sg.vantagepoint.a.c a false")
+    #[serde(default)]
+    pub startup_commands: Vec<String>,
 }
 
 pub fn session_dir() -> Option<PathBuf> {
@@ -49,10 +52,19 @@ pub fn session_path(package: &str) -> Option<PathBuf> {
 }
 
 impl Session {
-    pub fn load(package: &str) -> Option<Self> {
-        let path = session_path(package)?;
-        let content = std::fs::read_to_string(&path).ok()?;
-        serde_json::from_str(&content).ok()
+    /// Returns Ok(None) if no session file exists, Ok(Some) on success, Err on parse failure.
+    pub fn load(package: &str) -> Result<Option<Self>, String> {
+        let path = match session_path(package) {
+            Some(p) => p,
+            None => return Ok(None),
+        };
+        let content = match std::fs::read_to_string(&path) {
+            Ok(c) => c,
+            Err(_) => return Ok(None), // file doesn't exist
+        };
+        serde_json::from_str(&content)
+            .map(Some)
+            .map_err(|e| format!("Session JSON parse error in {}: {}", path.display(), e))
     }
 
     pub fn save(&self, package: &str) -> std::io::Result<PathBuf> {

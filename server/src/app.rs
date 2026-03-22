@@ -524,6 +524,8 @@ pub struct App {
 
     // Startup command queue (from dexbgd.ini [startup])
     pub startup_queue: VecDeque<String>,
+    // Session startup commands deferred until APK symbols are loaded
+    pub session_startup_queue: Vec<String>,
     /// When auto_connect_retry is on, tracks when last disconnect/fail occurred.
     pub retry_timer: Option<std::time::Instant>,
 
@@ -704,6 +706,7 @@ impl App {
                 q
             },
             retry_timer: None,
+            session_startup_queue: Vec::new(),
             cap_force_early_return: false,
             cap_pop_frame: false,
             cap_redefine_classes: false,
@@ -5450,6 +5453,11 @@ impl App {
                 offset: bm.offset,
                 label: bm.label.clone(),
             }).collect(),
+            startup_commands: vec![
+                "# Commands here run automatically after APK symbols load on connect".to_string(),
+                "# anti com.example.Security isRooted false".to_string(),
+                "# anti com.example.License check true".to_string(),
+            ],
         };
         match session.save(&pkg) {
             Ok(path) => self.log_info(&format!("Session saved: {}", path.display())),
@@ -5459,8 +5467,12 @@ impl App {
 
     fn load_session(&mut self, pkg: &str) {
         let session = match crate::session::Session::load(pkg) {
-            Some(s) => s,
-            None => return,
+            Ok(Some(s)) => s,
+            Ok(None) => return,
+            Err(e) => {
+                self.log_error(&e);
+                return;
+            }
         };
         let ac = session.aliases.len();
         let cc = session.comments.len();
@@ -5497,11 +5509,29 @@ impl App {
             }
         }
 
-        if ac + cc + hc + bc > 0 {
-            self.log_info(&format!(
-                "Session loaded: {} aliases, {} comments, {} hooks, {} bookmarks",
-                ac, cc, hc, bc
-            ));
+        let cmds: Vec<String> = session.startup_commands.into_iter()
+            .filter(|c| !c.trim_start().starts_with('#') && !c.trim().is_empty())
+            .collect();
+        let sc = cmds.len();
+
+        self.log_info(&format!(
+            "Session loaded: {} aliases, {} comments, {} hooks, {} bookmarks, {} startup commands",
+            ac, cc, hc, bc, sc
+        ));
+
+        if !self.dex_data.is_empty() {
+            // APK already loaded — execute now
+            self.run_startup_commands(cmds);
+        } else {
+            // APK not loaded yet — defer until do_load_apk finishes
+            self.session_startup_queue = cmds;
+        }
+    }
+
+    fn run_startup_commands(&mut self, cmds: Vec<String>) {
+        for cmd in cmds {
+            self.log_info(&format!("[startup] > {}", cmd));
+            self.execute_command(&cmd);
         }
     }
 
@@ -6101,6 +6131,12 @@ impl App {
             Err(e) => {
                 self.log_error(&e);
             }
+        }
+
+        // Run session startup commands now that symbols are available
+        let cmds = std::mem::take(&mut self.session_startup_queue);
+        if !cmds.is_empty() {
+            self.run_startup_commands(cmds);
         }
     }
 
