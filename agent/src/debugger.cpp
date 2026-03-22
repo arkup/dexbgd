@@ -3255,6 +3255,28 @@ void DebuggerCommandLoop(jvmtiEnv* jvmti, JNIEnv* jni, jthread thread,
             SendToClient(jb.buf);
             break;
 
+        } else if (strcmp(dcmd.cmd, "step_out2") == 0) {
+            if (!g_dbg.cap_frame_pop) {
+                SendError("step_out2: can_generate_frame_pop_events not available");
+                continue;
+            }
+            jint fc = 0;
+            jvmti->GetFrameCount(thread, &fc);
+            if (fc <= 1) {
+                SendError("step_out2: already at bottom frame (no caller to return to)");
+                continue;
+            }
+            SetStepThread(jni, thread);
+            jvmti->NotifyFramePop(thread, 0);
+            jvmti->SetEventNotificationMode(JVMTI_ENABLE, JVMTI_EVENT_FRAME_POP, thread);
+            JsonBuf jb;
+            json_start(&jb);
+            json_add_string(&jb, "type", "stepping");
+            json_add_string(&jb, "mode", "out2");
+            json_end(&jb);
+            SendToClient(jb.buf);
+            break;
+
         } else if (strcmp(dcmd.cmd, "force_return") == 0) {
             if (!g_dbg.cap_force_early_return) {
                 SendError("ForceEarlyReturn not available on this device");
@@ -3440,6 +3462,38 @@ void DebuggerCommandLoop(jvmtiEnv* jvmti, JNIEnv* jni, jthread thread,
     }
 
     g_dbg.thread_suspended = false;
+}
+
+// ---------------------------------------------------------------------------
+// HandleFramePop — called from OnFramePop callback in agent.cpp (sout2)
+// ---------------------------------------------------------------------------
+
+void HandleFramePop(jvmtiEnv* jvmti, JNIEnv* jni, jthread thread,
+                    jmethodID method, jboolean was_exception) {
+    // Guard: only fire for the thread that issued step_out2
+    if (!g_dbg.step_thread || !jni->IsSameObject(thread, g_dbg.step_thread)) return;
+
+    // One-shot: disable per-thread event immediately
+    jvmti->SetEventNotificationMode(JVMTI_DISABLE, JVMTI_EVENT_FRAME_POP, thread);
+
+    // Send minimal frame_pop event — method info lookup skipped (unreliable in FramePop)
+    JsonBuf jb;
+    json_start(&jb);
+    json_add_string(&jb, "type", "frame_pop");
+    json_add_string(&jb, "class", "");
+    json_add_string(&jb, "method", "");
+    json_add_string(&jb, "ret_type", "");
+    json_add_string(&jb, "ret_value", "");
+    json_add_bool(&jb, "was_exception", was_exception);
+    json_end(&jb);
+    SendToClient(jb.buf);
+
+    // Enable single-step (STEP_INTO) — OnSingleStep fires at caller's next instruction.
+    // Same pattern as ForceEarlyReturn: do NOT call DebuggerCommandLoop from FramePop.
+    if (g_dbg.cap_single_step) {
+        g_dbg.step_mode = STEP_INTO;
+        jvmti->SetEventNotificationMode(JVMTI_ENABLE, JVMTI_EVENT_SINGLE_STEP, nullptr);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -3832,6 +3886,29 @@ static void CmdSuspend(jvmtiEnv* jvmti, JNIEnv* jni, const char* json) {
             json_start(&jb);
             json_add_string(&jb, "type", "stepping");
             json_add_string(&jb, "mode", "out");
+            json_end(&jb);
+            SendToClient(jb.buf);
+            break;
+
+        } else if (strcmp(cmd, "step_out2") == 0) {
+            if (!g_dbg.cap_frame_pop) {
+                SendError("step_out2: can_generate_frame_pop_events not available");
+                continue;
+            }
+            jint fc = 0;
+            jvmti->GetFrameCount(target, &fc);
+            if (fc <= 1) {
+                SendError("step_out2: already at bottom frame (no caller to return to)");
+                continue;
+            }
+            SetStepThread(jni, target);
+            jvmti->NotifyFramePop(target, 0);
+            jvmti->SetEventNotificationMode(JVMTI_ENABLE, JVMTI_EVENT_FRAME_POP, target);
+            jvmti->ResumeThread(target);
+            JsonBuf jb;
+            json_start(&jb);
+            json_add_string(&jb, "type", "stepping");
+            json_add_string(&jb, "mode", "out2");
             json_end(&jb);
             SendToClient(jb.buf);
             break;
@@ -4578,6 +4655,7 @@ static void DispatchCommand(jvmtiEnv* jvmti, JNIEnv* jni, const char* json) {
         strcmp(cmd, "step_into") == 0 ||
         strcmp(cmd, "step_over") == 0 ||
         strcmp(cmd, "step_out") == 0 ||
+        strcmp(cmd, "step_out2") == 0 ||
         strcmp(cmd, "force_return") == 0 ||
         strcmp(cmd, "locals") == 0 ||
         strcmp(cmd, "regs") == 0 ||
@@ -4862,7 +4940,7 @@ static void* SocketThread(void* arg) {
             snprintf(caps_json, sizeof(caps_json),
                 "{\"breakpoints\":%s,\"single_step\":%s,\"local_vars\":%s,"
                 "\"line_numbers\":%s,\"bytecodes\":%s,\"tag_objects\":%s,"
-                "\"force_early_return\":%s,\"pop_frame\":%s,"
+                "\"force_early_return\":%s,\"pop_frame\":%s,\"frame_pop\":%s,"
                 "\"redefine_classes\":%s,\"retransform_classes\":%s}",
                 caps.can_generate_breakpoint_events ? "true" : "false",
                 caps.can_generate_single_step_events ? "true" : "false",
@@ -4872,6 +4950,7 @@ static void* SocketThread(void* arg) {
                 caps.can_tag_objects ? "true" : "false",
                 caps.can_force_early_return ? "true" : "false",
                 caps.can_pop_frame ? "true" : "false",
+                caps.can_generate_frame_pop_events ? "true" : "false",
                 caps.can_redefine_classes ? "true" : "false",
                 caps.can_retransform_classes ? "true" : "false");
             json_add_raw(&jb, "capabilities", caps_json);
@@ -4944,10 +5023,12 @@ void StartDebugger(jvmtiEnv* jvmti, JavaVM* vm) {
         g_dbg.cap_method_exit = (caps.can_generate_method_exit_events != 0);
         g_dbg.cap_force_early_return = (caps.can_force_early_return != 0);
         g_dbg.cap_pop_frame = (caps.can_pop_frame != 0);
-        ALOGI("[DBG] Caps: bytecodes=%d locals=%d bp=%d step=%d tags=%d lines=%d exit=%d force_ret=%d pop_frame=%d",
+        g_dbg.cap_frame_pop = (caps.can_generate_frame_pop_events != 0);
+        ALOGI("[DBG] Caps: bytecodes=%d locals=%d bp=%d step=%d tags=%d lines=%d exit=%d force_ret=%d pop_frame=%d frame_pop=%d",
               g_dbg.cap_bytecodes, g_dbg.cap_local_vars, g_dbg.cap_breakpoints,
               g_dbg.cap_single_step, g_dbg.cap_tag_objects, g_dbg.cap_line_numbers,
-              g_dbg.cap_method_exit, g_dbg.cap_force_early_return, g_dbg.cap_pop_frame);
+              g_dbg.cap_method_exit, g_dbg.cap_force_early_return, g_dbg.cap_pop_frame,
+              g_dbg.cap_frame_pop);
     }
 
     pthread_mutex_init(&g_dbg.sock_mutex, nullptr);

@@ -532,6 +532,7 @@ pub struct App {
     // Agent capabilities (optional)
     pub cap_force_early_return: bool,
     pub cap_pop_frame: bool,
+    pub cap_frame_pop: bool,
     pub cap_redefine_classes: bool,
 
     // Color theme (Ctrl+T to cycle)
@@ -709,6 +710,7 @@ impl App {
             session_startup_queue: Vec::new(),
             cap_force_early_return: false,
             cap_pop_frame: false,
+            cap_frame_pop: false,
             cap_redefine_classes: false,
             theme_index: config.theme_index.min(crate::theme::builtin_themes().len().saturating_sub(1)),
             themes: crate::theme::builtin_themes(),
@@ -873,14 +875,17 @@ impl App {
                     // Report optional capabilities
                     let fer = caps.force_early_return.unwrap_or(false);
                     let pf = caps.pop_frame.unwrap_or(false);
-                    if fer || pf {
+                    let fp = caps.frame_pop.unwrap_or(false);
+                    if fer || pf || fp {
                         let mut extras = Vec::new();
                         if fer { extras.push("force-early-return"); }
                         if pf { extras.push("pop-frame"); }
+                        if fp { extras.push("frame-pop"); }
                         self.log_info(&format!("Extra capabilities: {}", extras.join(", ")));
                     }
                     self.cap_force_early_return = fer;
                     self.cap_pop_frame = pf;
+                    self.cap_frame_pop = fp;
                     self.cap_redefine_classes = caps.redefine_classes.unwrap_or(false);
                 }
                 // Load per-app session (aliases, comments, hooks, bookmarks)
@@ -1314,6 +1319,20 @@ impl App {
             AgentMessage::Stepping { mode: _ } => {
                 self.state = AppState::Stepping;
                 self.stepping_since = Some(std::time::Instant::now());
+            }
+
+            AgentMessage::FramePop { class, method, ret_type, ret_value, was_exception } => {
+                // Just log the return value — step_hit follows and handles state/display
+                self.stepping_quiet = false;
+                self.stepping_since = None;
+                let ret_str = if was_exception {
+                    " (exception)".to_string()
+                } else if ret_type == "void" {
+                    String::new()
+                } else {
+                    format!(" -> {} {}", ret_type, ret_value)
+                };
+                self.log_info(&format!("[sout2] {}.{}(){}", short_class(&class), method, ret_str));
             }
 
             AgentMessage::StepThreadEnd {} => {
@@ -4981,7 +5000,8 @@ impl App {
         if self.current_loc == Some(-1) && self.state == AppState::Suspended
             && matches!(input, "si" | "step_into"
                              | "s" | "so" | "step_over" | "n" | "next"
-                             | "sout" | "step_out" | "finish")
+                             | "sout" | "step_out" | "finish"
+                             | "sout2" | "step_out2")
         {
             self.log_info("Stopped in native method - use F5 to resume");
             return;

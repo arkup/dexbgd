@@ -229,6 +229,8 @@ pub fn parse_command(input: &str) -> Result<OutboundCommand, String> {
 
         "sout" | "step_out" | "finish" => Ok(OutboundCommand::StepOut {}),
 
+        "sout2" | "step_out2" => Ok(OutboundCommand::StepOut2 {}),
+
         "fr" | "force_return" => {
             let val = match args.trim() {
                 "" | "void" | "null" | "false" | "0" => 0,

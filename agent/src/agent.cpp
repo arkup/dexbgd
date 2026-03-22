@@ -810,6 +810,17 @@ static void JNICALL OnSingleStep(
     }
 }
 
+// Callback: FramePop — fires when a method returns (after NotifyFramePop).
+// Used by sout2 (fast step-out): runs at full speed, no single-step overhead.
+static void JNICALL OnFramePop(
+        jvmtiEnv* jvmti,
+        JNIEnv* jni,
+        jthread thread,
+        jmethodID method,
+        jboolean was_exception) {
+    HandleFramePop(jvmti, jni, thread, method, was_exception);
+}
+
 // Callback: JIT compiled a method (only on userdebug/eng builds)
 static void JNICALL OnCompiledMethodLoad(
         jvmtiEnv* jvmti,
@@ -1243,6 +1254,11 @@ static jint SetupJvmtiAgent(JavaVM* vm, const char* entry_point) {
     if (potential.can_pop_frame) {
         caps.can_pop_frame = 1;
     }
+    bool have_frame_pop = false;
+    if (potential.can_generate_frame_pop_events) {
+        caps.can_generate_frame_pop_events = 1;
+        have_frame_pop = true;
+    }
     if (potential.can_redefine_classes) {
         caps.can_redefine_classes = 1;
     }
@@ -1297,6 +1313,9 @@ static jint SetupJvmtiAgent(JavaVM* vm, const char* entry_point) {
     }
     callbacks.ThreadEnd   = OnThreadEnd;
     callbacks.ThreadStart = OnThreadStart;
+    if (have_frame_pop) {
+        callbacks.FramePop = OnFramePop;
+    }
 
     err = jvmti->SetEventCallbacks(&callbacks, sizeof(callbacks));
     if (err != JVMTI_ERROR_NONE) {

@@ -107,6 +107,7 @@ struct DebuggerState {
     bool cap_suspend;
     bool cap_force_early_return;
     bool cap_pop_frame;
+    bool cap_frame_pop;
 
     // Large redefine JSON (heap-allocated, may be hundreds of KB).
     // Set by socket thread, consumed by app thread in DebuggerCommandLoop.
@@ -133,6 +134,11 @@ void DebuggerCommandLoop(jvmtiEnv* jvmti, JNIEnv* jni, jthread thread,
 // Returns true if we should stop (enter command loop), false to keep stepping.
 bool ShouldStopStepping(jvmtiEnv* jvmti, JNIEnv* jni, jthread thread,
                         jmethodID method, jlocation location);
+
+// Called from OnFramePop callback in agent.cpp (sout2 fast step-out).
+// Sends frame_pop event with return value, then enters command loop at caller.
+void HandleFramePop(jvmtiEnv* jvmti, JNIEnv* jni, jthread thread,
+                    jmethodID method, jboolean was_exception);
 
 // Called from OnThreadEnd callback in agent.cpp.
 // If the dying thread is the current step thread, cleans up step state and

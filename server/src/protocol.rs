@@ -94,6 +94,15 @@ pub enum AgentMessage {
     #[serde(rename = "stepping")]
     Stepping { mode: String },
 
+    #[serde(rename = "frame_pop")]
+    FramePop {
+        class: String,
+        method: String,
+        ret_type: String,
+        ret_value: String,
+        was_exception: bool,
+    },
+
     #[serde(rename = "step_thread_end")]
     StepThreadEnd {},
 
@@ -290,6 +299,7 @@ pub struct Capabilities {
     pub tag_objects: Option<bool>,
     pub force_early_return: Option<bool>,
     pub pop_frame: Option<bool>,
+    pub frame_pop: Option<bool>,
     #[serde(default)]
     pub redefine_classes: Option<bool>,
 }
@@ -443,6 +453,9 @@ pub enum OutboundCommand {
 
     #[serde(rename = "step_out")]
     StepOut {},
+
+    #[serde(rename = "step_out2")]
+    StepOut2 {},
 
     #[serde(rename = "locals")]
     Locals {},
