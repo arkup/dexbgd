@@ -604,22 +604,13 @@ fn draw_decompiler(f: &mut Frame, app: &App, area: Rect, block: ratatui::widgets
             .unwrap_or_else(|| decompiled.len().saturating_sub(1))
     };
 
-    // Clamp so the ► (PC) line is always visible.
-    // On initial load (auto_scroll) center the PC; otherwise only scroll when the PC
-    // walks off the edge — letting the marker travel all the way to the bottom before
-    // the view advances (same feel as a classic step-through debugger).
-    let scroll = if let Some(pc_idx) = scroll_dec_idx {
-        if app.bytecodes_auto_scroll {
-            // First arrival: center the PC in the view.
+    // On initial load (auto_scroll) center the PC in the view.
+    // After that, respect bytecodes_scroll directly — the StepHit handler keeps it
+    // in sync with the PC so the ► walks to the bottom edge before jumping.
+    let scroll = if app.bytecodes_auto_scroll {
+        if let Some(pc_idx) = scroll_dec_idx {
             if code_height > 0 { pc_idx.saturating_sub(code_height / 2) } else { 0 }
-        } else if pc_idx < base_scroll {
-            // PC scrolled above the top edge — follow it up.
-            pc_idx
-        } else if code_height > 0 && pc_idx >= base_scroll + code_height {
-            // PC walked off the bottom edge — scroll just enough to show it.
-            pc_idx.saturating_sub(code_height - 1)
         } else {
-            // PC still visible — keep the view where it is.
             base_scroll
         }
     } else {
@@ -632,11 +623,32 @@ fn draw_decompiler(f: &mut Frame, app: &App, area: Rect, block: ratatui::widgets
     // near_current: nearest preceding entry when PC is at a filtered instruction
     let near_current_idx = if current_dec_idx.is_none() { scroll_dec_idx } else { None };
 
+    // Normalize selection (anchor/head stored as decompiled indices)
+    let sel_full: Option<(usize, usize, usize, usize)> = match (app.bytecodes_sel_anchor, app.bytecodes_sel_head) {
+        (Some(a), Some(h)) if a != h => {
+            if a.0 < h.0 || (a.0 == h.0 && a.1 <= h.1) {
+                Some((a.0, a.1, h.0, h.1))
+            } else {
+                Some((h.0, h.1, a.0, a.1))
+            }
+        }
+        _ => None,
+    };
+    let sel_bg = t.ui_highlight_bg;
+
     for (idx, (offset, spans, important)) in decompiled.iter().enumerate().skip(scroll).take(code_height) {
         let is_current = current_dec_idx == Some(idx);
         let is_near  = near_current_idx == Some(idx);
         let marker = if is_current { "\u{25ba} " } else if is_near { "\u{00b7} " } else { "  " };
         let offset_str = format!("{:04x} ", offset);
+
+        // Selection column range for this line (None = row not selected)
+        let sel_cols: Option<(usize, usize)> = sel_full.and_then(|(r0, c0, r1, c1)| {
+            if idx < r0 || idx > r1 { return None; }
+            let start = if idx == r0 { c0 } else { 0 };
+            let end   = if idx == r1 { c1 } else { usize::MAX };
+            Some((start, end))
+        });
 
         let bg = if is_current { t.ui_current_bg } else if is_near { t.ui_cursor_bg } else { t.ui_bg };
 
@@ -650,12 +662,12 @@ fn draw_decompiler(f: &mut Frame, app: &App, area: Rect, block: ratatui::widgets
 
         let offset_style = Style::default().fg(t.ui_dim).bg(bg);
 
+        let prefix_len = marker.chars().count() + offset_str.chars().count();
         let mut line_spans = vec![
             Span::styled(marker.to_string(), marker_style),
             Span::styled(offset_str, offset_style),
         ];
-
-        // Adjust span backgrounds for current/near line
+        let mut col_pos = prefix_len;
         for span in spans {
             let mut s = span.style;
             if is_current {
@@ -663,6 +675,14 @@ fn draw_decompiler(f: &mut Frame, app: &App, area: Rect, block: ratatui::widgets
                 if *important { s = s.add_modifier(Modifier::BOLD); }
             } else if is_near {
                 s = s.bg(bg);
+            }
+            if let Some((sc, ec)) = sel_cols {
+                let span_len = span.content.chars().count();
+                let span_end = col_pos + span_len;
+                if span_end > sc && col_pos < ec.min(usize::MAX - 1).saturating_add(1) {
+                    s = s.bg(sel_bg);
+                }
+                col_pos = span_end;
             }
             line_spans.push(Span::styled(span.content.to_string(), s));
         }

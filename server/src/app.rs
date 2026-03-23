@@ -306,6 +306,7 @@ pub enum ContextMenuSource {
     Trace,
     Ai,
     Bytecodes,
+    Decompiler,
     Locals,
     Tabbed,
     PatchSubmenu,
@@ -2153,7 +2154,21 @@ impl App {
                         self.command_focused = false;
 
                         // Click in bytecodes panel: select instruction
-                        if self.left_tab == LeftTab::Bytecodes && !self.bytecodes.is_empty() {
+                        if self.left_tab == LeftTab::Decompiler && !self.bytecodes.is_empty() {
+                            let inner_y = (row.saturating_sub(ba.y + 1)) as usize;
+                            if inner_y > 0 {
+                                let base_dec = decompiled_idx_of(&self.bytecodes,
+                                    self.bytecodes_scroll.min(self.bytecodes.len().saturating_sub(1)));
+                                let dec_len = self.bytecodes.iter()
+                                    .filter(|i| !crate::tui::bytecodes::is_decompiler_noise(&i.text))
+                                    .count();
+                                let dec_idx = (base_dec + (inner_y - 1)).min(dec_len.saturating_sub(1));
+                                let click_col = col.saturating_sub(ba.x + 1) as usize;
+                                self.bytecodes_sel_anchor = Some((dec_idx, click_col));
+                                self.bytecodes_sel_head = Some((dec_idx, click_col));
+                                self.drag = DragTarget::BytecodesArea;
+                            }
+                        } else if self.left_tab == LeftTab::Bytecodes && !self.bytecodes.is_empty() {
                             let inner_y = (row.saturating_sub(ba.y + 1)) as usize;
                             if inner_y > 0 { // skip header line
                                 let scroll = self.effective_bytecodes_scroll(ba.height);
@@ -2327,11 +2342,21 @@ impl App {
                             {
                                 let inner_y = (row.saturating_sub(ba.y + 1)) as usize;
                                 if inner_y > 0 {
-                                    let scroll = self.effective_bytecodes_scroll(ba.height);
-                                    let bc_idx = (scroll + (inner_y - 1))
-                                        .min(self.bytecodes.len().saturating_sub(1));
                                     let drag_c = col.saturating_sub(ba.x + 1) as usize;
-                                    self.bytecodes_sel_head = Some((bc_idx, drag_c));
+                                    if self.left_tab == LeftTab::Decompiler {
+                                        let base_dec = decompiled_idx_of(&self.bytecodes,
+                                            self.bytecodes_scroll.min(self.bytecodes.len().saturating_sub(1)));
+                                        let dec_len = self.bytecodes.iter()
+                                            .filter(|i| !crate::tui::bytecodes::is_decompiler_noise(&i.text))
+                                            .count();
+                                        let dec_idx = (base_dec + (inner_y - 1)).min(dec_len.saturating_sub(1));
+                                        self.bytecodes_sel_head = Some((dec_idx, drag_c));
+                                    } else {
+                                        let scroll = self.effective_bytecodes_scroll(ba.height);
+                                        let bc_idx = (scroll + (inner_y - 1))
+                                            .min(self.bytecodes.len().saturating_sub(1));
+                                        self.bytecodes_sel_head = Some((bc_idx, drag_c));
+                                    }
                                 }
                             }
                         }
@@ -2367,8 +2392,8 @@ impl App {
                     let ba = geom.bytecodes_area;
                     let lga = geom.log_area;
 
-                    // Right-click in Bytecodes/Decompiler panel (left panel)
-                    if (self.left_tab == LeftTab::Bytecodes || self.left_tab == LeftTab::Decompiler)
+                    // Right-click in Bytecodes panel
+                    if self.left_tab == LeftTab::Bytecodes
                         && col > ba.x && col < ba.x + ba.width.saturating_sub(1)
                         && row > ba.y && row < ba.y + ba.height.saturating_sub(1)
                     {
@@ -2493,6 +2518,67 @@ impl App {
                                 selected: 0,
                                 source: ContextMenuSource::Bytecodes,
                                 line_idx: bc_idx,
+                                click_col: click_c,
+                                keyboard_navigable: false,
+                            });
+                            self.focus = 0;
+                            self.command_focused = false;
+                        }
+                    }
+                    // Right-click in Decompiler panel
+                    else if self.left_tab == LeftTab::Decompiler
+                        && col > ba.x && col < ba.x + ba.width.saturating_sub(1)
+                        && row > ba.y && row < ba.y + ba.height.saturating_sub(1)
+                    {
+                        let inner_y = (row - ba.y - 1) as usize;
+                        let inner_height = ba.height.saturating_sub(2) as usize;
+                        let code_height = inner_height.saturating_sub(1);
+                        let click_c = col.saturating_sub(ba.x + 1) as usize;
+                        if inner_y == 0 {
+                            // Header: copy class/method
+                            let short = self.current_class.as_deref()
+                                .map(|s| crate::commands::short_class(s).to_string())
+                                .unwrap_or_else(|| "?".to_string());
+                            let meth = self.current_method.as_deref().unwrap_or("?");
+                            self.context_menu = Some(ContextMenu {
+                                x: col,
+                                y: row,
+                                items: vec![
+                                    format!("  Copy: {}.{}", short, meth),
+                                    "  Copy: class sig ".into(),
+                                ],
+                                selected: 0,
+                                source: ContextMenuSource::Bytecodes,
+                                line_idx: usize::MAX,
+                                click_col: click_c,
+                                keyboard_navigable: false,
+                            });
+                            self.focus = 0;
+                            self.command_focused = false;
+                        } else if inner_y <= code_height && !self.bytecodes.is_empty() {
+                            let base_dec = decompiled_idx_of(&self.bytecodes,
+                                self.bytecodes_scroll.min(self.bytecodes.len().saturating_sub(1)));
+                            let dec_idx = base_dec + (inner_y - 1);
+                            let raw_idx = raw_idx_for_decompiled(&self.bytecodes, dec_idx);
+                            let word_label = self.bytecodes.get(raw_idx)
+                                .map(|i| format!("  {:04x}: {}", i.offset, i.text))
+                                .and_then(|line| word_at_col(&line, click_c).map(|w| w.to_string()))
+                                .map(|w| copy_word_label(&w))
+                                .unwrap_or_else(|| "  Copy Word    ".into());
+                            let mut items: Vec<String> = Vec::new();
+                            if self.bytecodes_has_selection() {
+                                items.push("  Copy Sel     ".into());
+                            }
+                            items.push("  Copy Line    ".into());
+                            items.push("  Copy View    ".into());
+                            items.push(word_label);
+                            self.context_menu = Some(ContextMenu {
+                                x: col,
+                                y: row,
+                                items,
+                                selected: 0,
+                                source: ContextMenuSource::Decompiler,
+                                line_idx: dec_idx,
                                 click_col: click_c,
                                 keyboard_navigable: false,
                             });
@@ -2882,6 +2968,7 @@ impl App {
             ContextMenuSource::Trace => self.handle_trace_context_menu(item_idx, &menu),
             ContextMenuSource::Ai => self.handle_ai_context_menu(item_idx, &menu),
             ContextMenuSource::Bytecodes => self.handle_bytecodes_context_menu(item_idx, &menu),
+            ContextMenuSource::Decompiler => self.handle_decompiler_context_menu(item_idx, &menu),
             ContextMenuSource::Locals => self.handle_locals_context_menu(item_idx, &menu),
             ContextMenuSource::Tabbed => self.handle_tabbed_context_menu(item_idx, &menu),
             ContextMenuSource::PatchSubmenu => self.handle_patch_submenu(item_idx, &menu),
@@ -3325,6 +3412,95 @@ impl App {
         }
     }
 
+    fn handle_decompiler_context_menu(&mut self, item_idx: usize, menu: &ContextMenu) {
+        let label = menu.items.get(item_idx).map(|s| s.trim()).unwrap_or("");
+        match label {
+            "Copy Sel" => {
+                self.copy_decompiler_selection();
+            }
+            "Copy Line" => {
+                let raw_idx = raw_idx_for_decompiled(&self.bytecodes, menu.line_idx);
+                if let Some(instr) = self.bytecodes.get(raw_idx) {
+                    copy_to_clipboard(&format!("{:04x}: {}", instr.offset, instr.text));
+                }
+            }
+            "Copy View" => {
+                self.copy_decompiler_view();
+            }
+            "Copy: class sig" => {
+                if let Some(cls) = &self.current_class.clone() {
+                    copy_to_clipboard(cls);
+                }
+            }
+            l if l.starts_with("Copy:") && menu.line_idx == usize::MAX => {
+                let short = self.current_class.as_deref()
+                    .map(|s| crate::commands::short_class(s).to_string())
+                    .unwrap_or_else(|| "?".to_string());
+                let meth = self.current_method.as_deref().unwrap_or("?");
+                copy_to_clipboard(&format!("{}.{}", short, meth));
+            }
+            l if l.starts_with("Copy:") => {
+                let raw_idx = raw_idx_for_decompiled(&self.bytecodes, menu.line_idx);
+                if let Some(instr) = self.bytecodes.get(raw_idx) {
+                    let line = format!("  {:04x}: {}", instr.offset, instr.text);
+                    if let Some(word) = word_at_col(&line, menu.click_col) {
+                        copy_to_clipboard(word);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn copy_decompiler_selection(&self) {
+        use crate::tui::bytecodes::is_decompiler_noise;
+        let (anchor, head) = match (self.bytecodes_sel_anchor, self.bytecodes_sel_head) {
+            (Some(a), Some(h)) => (a, h),
+            _ => return,
+        };
+        if anchor == head { return; }
+        let (r0, c0, r1, c1) = if anchor.0 < head.0 || (anchor.0 == head.0 && anchor.1 <= head.1) {
+            (anchor.0, anchor.1, head.0, head.1)
+        } else {
+            (head.0, head.1, anchor.0, anchor.1)
+        };
+        let decompiled: Vec<(u32, String)> = self.bytecodes.iter()
+            .filter(|i| !is_decompiler_noise(&i.text))
+            .map(|i| (i.offset, i.text.clone()))
+            .collect();
+        let mut parts: Vec<String> = Vec::new();
+        for row in r0..=r1 {
+            if let Some((offset, text)) = decompiled.get(row) {
+                let flat = format!("  {:04x}: {}", offset, text);
+                let chars: Vec<char> = flat.chars().collect();
+                let start = if row == r0 { c0.min(chars.len()) } else { 0 };
+                let end   = if row == r1 { c1.min(chars.len()) } else { chars.len() };
+                let (start, end) = (start.min(end), start.max(end));
+                parts.push(chars[start..end].iter().collect());
+            }
+        }
+        copy_to_clipboard(&parts.join("\n"));
+    }
+
+    fn copy_decompiler_view(&self) {
+        use crate::tui::bytecodes::is_decompiler_noise;
+        let code_height = self.layout_geom.as_ref()
+            .map(|g| g.bytecodes_area.height.saturating_sub(3) as usize)
+            .unwrap_or(20);
+        let base_dec = if self.bytecodes.is_empty() { 0 } else {
+            decompiled_idx_of(&self.bytecodes,
+                self.bytecodes_scroll.min(self.bytecodes.len().saturating_sub(1)))
+        };
+        let text: String = self.bytecodes.iter()
+            .filter(|i| !is_decompiler_noise(&i.text))
+            .skip(base_dec)
+            .take(code_height)
+            .map(|i| format!("{:04x}: {}", i.offset, i.text))
+            .collect::<Vec<_>>()
+            .join("\n");
+        copy_to_clipboard(&text);
+    }
+
     // -------------------------------------------------------------------
     // Keyboard-navigable context menu (patch submenu)
     // -------------------------------------------------------------------
@@ -3366,6 +3542,8 @@ impl App {
                             self.handle_patch_submenu(idx, &menu),
                         ContextMenuSource::Bytecodes =>
                             self.handle_bytecodes_context_menu(idx, &menu),
+                        ContextMenuSource::Decompiler =>
+                            self.handle_decompiler_context_menu(idx, &menu),
                         _ => {}
                     }
                 }
@@ -3717,6 +3895,9 @@ impl App {
                     } else if self.left_tab == LeftTab::Ai {
                         self.ai_auto_scroll = false;
                         self.ai_scroll = apply_scroll(self.ai_scroll, delta, self.ai_output.len());
+                    } else if self.left_tab == LeftTab::Decompiler {
+                        self.bytecodes_auto_scroll = false;
+                        self.scroll_decompiler(delta);
                     } else {
                         // Sync stored scroll to current displayed position before switching to manual
                         if self.bytecodes_auto_scroll {
@@ -4500,6 +4681,23 @@ impl App {
         }
     }
 
+    /// Scroll the Decompiler view by `delta` decompiled lines (skips noise instructions).
+    fn scroll_decompiler(&mut self, delta: i32) {
+        use crate::tui::bytecodes::is_decompiler_noise;
+        let dec_len = self.bytecodes.iter()
+            .filter(|i| !is_decompiler_noise(&i.text))
+            .count();
+        if dec_len == 0 { return; }
+        let base_dec = decompiled_idx_of(&self.bytecodes,
+            self.bytecodes_scroll.min(self.bytecodes.len().saturating_sub(1)));
+        let new_dec = if delta < 0 {
+            base_dec.saturating_sub((-delta) as usize)
+        } else {
+            (base_dec + delta as usize).min(dec_len.saturating_sub(1))
+        };
+        self.bytecodes_scroll = raw_idx_for_decompiled(&self.bytecodes, new_dec);
+    }
+
     fn scroll_active(&mut self, delta: i32) {
         match self.focus {
             0 => {
@@ -4511,6 +4709,9 @@ impl App {
                 } else if self.left_tab == LeftTab::Ai {
                     self.ai_auto_scroll = false;
                     self.ai_scroll = apply_scroll(self.ai_scroll, delta, self.ai_output.len());
+                } else if self.left_tab == LeftTab::Decompiler {
+                    self.bytecodes_auto_scroll = false;
+                    self.scroll_decompiler(delta);
                 } else {
                     self.bytecodes_auto_scroll = false;
                     self.bytecodes_scroll = apply_scroll(self.bytecodes_scroll, delta, self.bytecodes.len());
