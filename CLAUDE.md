@@ -1,8 +1,11 @@
 # dexbgd - agent instructions
 
+## Documentation
+- When adding a new TUI command, update `doc/all_commands.md` with the command syntax and examples.
+
 ## Project layout
-- `agent/src/` - C++ JVMTI agent (debugger.cpp is the main file, ~3500 lines)
-- `server/src/` - Rust TUI server (app.rs is the main file, ~4600 lines)
+- `agent/src/` - C++ JVMTI agent (debugger.cpp is the main file)
+- `server/src/` - Rust TUI server (app.rs is the main file)
 - `server/src/tui/` - Panel rendering
 - Agent is thin (JVMTI callbacks, JSON events). Server has all logic (disassembly, parsing, UI, AI).
 
@@ -43,13 +46,6 @@ slot = GetMaxLocals(method) - GetArgumentsSize(method) + param_idx;
 - Dead step thread detected via `GetThreadInfo` failure, triggers cleanup
 - `stepping_quiet` flag in server suppresses verbose logs during step sequences
 
-### Dynamic DEX interception
-- JsonBuf 16KB limit - `SendDexLoaded` uses malloc for large DEX
-- DexClassLoader path may contain `:` for multiple DEX files
-- InMemoryDexClassLoader: agent rewinds ByteBuffer before/after extraction
-- `GetLocalVariableTable` fails on framework classes - agent scans slots as fallback
-- `do_load_apk()` replaces dex_data, dynamic loads append with `[dynamic-N]` labels
-
 ### Build gotchas
 - Must use `-G Ninja` for CMake (VS generator fails with NDK)
 - Delete `build/` when switching generators
@@ -58,6 +54,14 @@ slot = GetMaxLocals(method) - GetArgumentsSize(method) + param_idx;
 - No unicode in user-facing strings (terminal rendering issues) — this means ALL log_info/log_error calls and any string rendered in the TUI. Use plain ASCII: `-` not `—`, `->` not `→`
 - Agent .so must be bundled in APK, not /data/local/tmp/ (SELinux)
 - Use bare library name for attach-agent (avoids base64 path truncation)
+
+### Session persistence
+- Per-app state saved in `sessions/<pkg>.json` next to the server binary
+- `Session` struct is in `server/src/session.rs` — add new persistent fields there with `#[serde(default)]`
+- Load/save happens in `app.rs`: `load_session()` / `do_save_session()` — wire new fields in both
+
+### TUI display helpers
+- `short_class(sig)` — strips package, returns bare class name (after last `.` and `$`). Use this whenever displaying a class name in the log or TUI.
 
 ### Device
 - Pixel "lynx", Android 14, user build, Magisk root
