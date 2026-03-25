@@ -32,6 +32,9 @@ pub struct Session {
     /// Commands to run automatically on session load (e.g. "anti sg.vantagepoint.a.c a false")
     #[serde(default)]
     pub startup_commands: Vec<String>,
+    /// Exception class name patterns to suppress from the log (lowercased substrings).
+    #[serde(default)]
+    pub excp_mutes: Vec<String>,
 }
 
 pub fn session_dir() -> Option<PathBuf> {

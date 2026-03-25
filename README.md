@@ -207,6 +207,8 @@ See [doc/ai_setup.md](doc/ai_setup.md) for setup instructions.
 
 ## Command reference
 
+See [doc/all_commands.md](doc/all_commands.md) for the full, up-to-date list of commands.
+
 ### Connection
 ```
 procs / ps              List debuggable processes

@@ -18,6 +18,7 @@ Aliases shown as `cmd / alias`.  `[...]` = optional.  `<...>` = required.
 | Browse | `cls`, `methods`, `fields`, `dis` |
 | Heap | `heap`, `heapstr`, `strings`, `xref` |
 | Bypass | `patch`, `anti`, `bypass-ssl`, `jni redirect` |
+| Exceptions | `excp-mute`, `excp-unmute`, `excp-mutes` |
 | Record | `record` |
 | AI | `ai` |
 
@@ -462,7 +463,28 @@ hook clear *                     Remove all hooks
 
 ---
 
-## 20. Settings & log
+## 20. Exception mutes
+
+```
+excp-mute <pat>                  Suppress caught exceptions whose class name contains pattern
+excp-unmute <pat>                Remove a mute rule
+excp-mutes                       List active mute rules with suppression counts
+```
+
+Matching is case-insensitive substring on the short class name. Uncaught exceptions always bypass mutes.
+
+Examples:
+```
+excp-mute ErrnoException
+excp-mute ClassNotFoundException
+excp-mute NoSuchMethodException
+excp-unmute ErrnoException
+excp-mutes
+```
+
+---
+
+## 21. Settings & log
 
 ```
 lc / log-clear                   Clear log window

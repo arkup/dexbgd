@@ -529,6 +529,8 @@ pub struct App {
     pub aliases: HashMap<String, String>,
     /// App-specific intercept hooks (persisted in sessions/<pkg>.json).
     pub hooks: Vec<crate::session::HookRule>,
+    /// Exception mute rules: pattern (lowercased substring) -> suppressed count this session.
+    pub excp_mutes: HashMap<String, u32>,
     /// Breakpoints queued for restore after RedefineClasses cleared them.
     /// Each entry: (class, method, location, optional_condition).
     /// Consumed by the next matching BpSetOk to re-attach conditions.
@@ -725,6 +727,7 @@ impl App {
             current_package: None,
             aliases: HashMap::new(),
             hooks: Vec::new(),
+            excp_mutes: HashMap::new(),
             redefine_restore: Vec::new(),
             jni_natives: Vec::new(),
             jni_monitoring: false,
@@ -1888,6 +1891,14 @@ impl App {
                 } else {
                     " (uncaught)".into()
                 };
+                if caught && !self.excp_mutes.is_empty() {
+                    let exc_lower = exc.to_lowercase();
+                    let pat = self.excp_mutes.keys().find(|p| exc_lower.contains(p.to_lowercase().as_str())).cloned();
+                    if let Some(pat) = pat {
+                        *self.excp_mutes.get_mut(&pat).unwrap() += 1;
+                        return;
+                    }
+                }
                 self.log_exception(&format!("{}: \"{}\" in {}.{} @{}{}",
                     exc, message, cls, method, location, caught_str));
             }
@@ -5018,6 +5029,47 @@ impl App {
             return;
         }
 
+        // Exception mute commands
+        if input == "excp-mutes" {
+            if self.excp_mutes.is_empty() {
+                self.log_info("No exception mutes active.");
+            } else {
+                let mut entries: Vec<(String, u32)> = self.excp_mutes.iter()
+                    .map(|(p, c)| (p.clone(), *c))
+                    .collect();
+                entries.sort_by(|a, b| a.0.cmp(&b.0));
+                let header = format!("{} exception mute(s):", entries.len());
+                self.log_info(&header);
+                for (pat, count) in entries {
+                    self.log_info(&format!("  {} ({} suppressed)", pat, count));
+                }
+            }
+            return;
+        }
+        if input.starts_with("excp-mute ") {
+            let pat = input["excp-mute ".len()..].trim().to_string();
+            if pat.is_empty() {
+                self.log_error("usage: excp-mute <pattern>");
+            } else if self.excp_mutes.keys().any(|k| k.to_lowercase() == pat.to_lowercase()) {
+                self.log_info(&format!("Already muted: {}", pat));
+            } else {
+                self.excp_mutes.insert(pat.clone(), 0);
+                self.log_info(&format!("Muted: {}  (Ctrl+S to save)", pat));
+            }
+            return;
+        }
+        if input.starts_with("excp-unmute ") {
+            let pat = input["excp-unmute ".len()..].trim().to_string();
+            let key = self.excp_mutes.keys().find(|k| k.to_lowercase() == pat.to_lowercase()).cloned();
+            if let Some(key) = key {
+                self.excp_mutes.remove(&key);
+                self.log_info(&format!("Unmuted: {}", key));
+            } else {
+                self.log_error(&format!("No mute rule for: {}", pat));
+            }
+            return;
+        }
+
         if input.starts_with("launch ") {
             let pkg = input.splitn(2, ' ').nth(1).unwrap_or("").trim();
             self.do_launch(pkg);
@@ -5916,6 +5968,7 @@ impl App {
                 "# anti com.example.Security isRooted false".to_string(),
                 "# anti com.example.License check true".to_string(),
             ],
+            excp_mutes: self.excp_mutes.keys().cloned().collect(),
         };
         match session.save(&pkg) {
             Ok(path) => self.log_info(&format!("Session saved: {}", path.display())),
@@ -5936,6 +5989,7 @@ impl App {
         let cc = session.comments.len();
         let hc = session.hooks.len();
         let bc = session.bookmarks.len();
+        let mc = session.excp_mutes.len();
 
         self.aliases = session.aliases;
         for (key, val) in session.comments {
@@ -5953,6 +6007,7 @@ impl App {
             label: b.label.clone(),
         }).collect();
         self.hooks = session.hooks.clone();
+        self.excp_mutes = session.excp_mutes.into_iter().map(|p| (p, 0u32)).collect();
 
         // Re-apply hooks as breakpoints with actions
         for hook in &session.hooks {
@@ -5973,8 +6028,8 @@ impl App {
         let sc = cmds.len();
 
         self.log_info(&format!(
-            "Session loaded: {} aliases, {} comments, {} hooks, {} bookmarks, {} startup commands",
-            ac, cc, hc, bc, sc
+            "Session loaded: {} aliases, {} comments, {} hooks, {} bookmarks, {} mutes, {} startup commands",
+            ac, cc, hc, bc, mc, sc
         ));
 
         if !self.dex_data.is_empty() {
