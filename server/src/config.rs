@@ -9,6 +9,8 @@ pub struct AiConfig {
     pub ollama_model: String,
     pub ollama_url: String,    // runtime only, not persisted
     pub max_turns: usize,
+    /// Milliseconds to wait between turns (helps avoid rate limits).
+    pub turn_delay_ms: u64,
 }
 
 impl Default for AiConfig {
@@ -19,6 +21,7 @@ impl Default for AiConfig {
             ollama_model: "qwen2.5:7b".into(),
             ollama_url: "http://localhost:11434".into(),
             max_turns: 25,
+            turn_delay_ms: 0,
         }
     }
 }
@@ -194,6 +197,11 @@ impl Config {
                 cfg.ai.max_turns = n.max(1);
             }
         }
+        if let Some(v) = ai.get("turn_delay_ms") {
+            if let Ok(n) = v.parse::<u64>() {
+                cfg.ai.turn_delay_ms = n;
+            }
+        }
 
         cfg
     }
@@ -254,6 +262,7 @@ impl Config {
         out.push_str(&format!("claude_model={}\n", self.ai.claude_model));
         out.push_str(&format!("ollama_model={}\n", self.ai.ollama_model));
         out.push_str(&format!("max_turns={}\n", self.ai.max_turns));
+        out.push_str(&format!("turn_delay_ms={}\n", self.ai.turn_delay_ms));
 
         std::fs::write(&path, out)?;
         Ok(path)

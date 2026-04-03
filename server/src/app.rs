@@ -297,6 +297,8 @@ pub enum DragTarget {
     LogArea,
     /// Click-drag selection in the bytecodes panel.
     BytecodesArea,
+    /// Click-drag selection in the AI output panel.
+    AiArea,
 }
 
 /// Which panel spawned the context menu.
@@ -453,6 +455,10 @@ pub struct App {
     pub bytecodes_sel_anchor: Option<(usize, usize)>,
     pub bytecodes_sel_head: Option<(usize, usize)>,
 
+    /// Mouse selection in the AI output panel: (line_idx, display_col).
+    pub ai_sel_anchor: Option<(usize, usize)>,
+    pub ai_sel_head: Option<(usize, usize)>,
+
     // Tabbed panel scroll
     pub tabbed_scroll: usize,
 
@@ -587,6 +593,7 @@ pub struct App {
     pub ai_output: Vec<AiOutputLine>,
     pub ai_scroll: usize,
     pub ai_auto_scroll: bool,
+    pub ai_line_buf: String, // partial line buffer for streaming text deltas
     pub ai_req_tx: Option<mpsc::Sender<AiRequest>>,
     pub ai_evt_rx: Option<mpsc::Receiver<AiEvent>>,
     pub ai_cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
@@ -695,6 +702,8 @@ impl App {
             log_sel_head: None,
             bytecodes_sel_anchor: None,
             bytecodes_sel_head: None,
+            ai_sel_anchor: None,
+            ai_sel_head: None,
             tabbed_scroll: 0,
             heap_rows: Vec::new(),
             heap_scroll: 0,
@@ -769,6 +778,7 @@ impl App {
             ai_output: Vec::new(),
             ai_scroll: 0,
             ai_auto_scroll: true,
+            ai_line_buf: String::new(),
             ai_req_tx: None,
             ai_evt_rx: None,
             ai_cancel: None,
@@ -1511,8 +1521,10 @@ impl App {
                         value: obj.value.clone(),
                     });
                 }
-                self.right_tab = RightTab::Heap;
-                self.tabbed_scroll = 0;
+                if self.ai_state == AiState::Idle {
+                    self.right_tab = RightTab::Heap;
+                    self.tabbed_scroll = 0;
+                }
             }
 
             AgentMessage::HeapStringsResult { pattern, total_strings, matches, strings } => {
@@ -1533,8 +1545,10 @@ impl App {
                         value: entry.value.clone(),
                     });
                 }
-                self.right_tab = RightTab::Heap;
-                self.tabbed_scroll = 0;
+                if self.ai_state == AiState::Idle {
+                    self.right_tab = RightTab::Heap;
+                    self.tabbed_scroll = 0;
+                }
             }
 
             AgentMessage::MemDumpResult { addr, size, path, data_b64 } => {
@@ -1686,7 +1700,9 @@ impl App {
 
             AgentMessage::JniMonitorStarted {} => {
                 self.jni_monitoring = true;
-                self.left_tab = LeftTab::JniMonitor;
+                if self.ai_state == AiState::Idle {
+                    self.left_tab = LeftTab::JniMonitor;
+                }
                 self.log_info("JNI monitor started - watching RegisterNatives");
             }
 
@@ -1735,7 +1751,9 @@ impl App {
 
             AgentMessage::RecordStarted {} => {
                 self.recording_active = true;
-                self.left_tab = LeftTab::Trace;
+                if self.ai_state == AiState::Idle {
+                    self.left_tab = LeftTab::Trace;
+                }
                 self.log_info("Call recording started");
             }
 
@@ -2191,6 +2209,21 @@ impl App {
                                         .map(|w| w.to_string());
                                 }
                             }
+                        } else if self.left_tab == LeftTab::Ai && !self.ai_output.is_empty() {
+                            let inner_y = (row.saturating_sub(ba.y + 1)) as usize;
+                            let inner_height = ba.height.saturating_sub(2) as usize;
+                            if inner_y < inner_height {
+                                let scroll = if self.ai_auto_scroll {
+                                    self.ai_output.len().saturating_sub(inner_height)
+                                } else {
+                                    self.ai_scroll
+                                };
+                                let ai_idx = (scroll + inner_y).min(self.ai_output.len().saturating_sub(1));
+                                let click_col = col.saturating_sub(ba.x + 1) as usize;
+                                self.ai_sel_anchor = Some((ai_idx, click_col));
+                                self.ai_sel_head = Some((ai_idx, click_col));
+                                self.drag = DragTarget::AiArea;
+                            }
                         } else if self.left_tab == LeftTab::Bytecodes && !self.bytecodes.is_empty() {
                             let inner_y = (row.saturating_sub(ba.y + 1)) as usize;
                             if inner_y > 0 { // skip header line
@@ -2381,6 +2414,23 @@ impl App {
                                         self.bytecodes_sel_head = Some((bc_idx, drag_c));
                                     }
                                 }
+                            }
+                        }
+                        DragTarget::AiArea => {
+                            let ba = geom.bytecodes_area;
+                            if row > ba.y && row < ba.y + ba.height.saturating_sub(1)
+                                && !self.ai_output.is_empty()
+                            {
+                                let inner_y = (row.saturating_sub(ba.y + 1)) as usize;
+                                let inner_height = ba.height.saturating_sub(2) as usize;
+                                let scroll = if self.ai_auto_scroll {
+                                    self.ai_output.len().saturating_sub(inner_height)
+                                } else {
+                                    self.ai_scroll
+                                };
+                                let ai_idx = (scroll + inner_y).min(self.ai_output.len().saturating_sub(1));
+                                let drag_c = col.saturating_sub(ba.x + 1) as usize;
+                                self.ai_sel_head = Some((ai_idx, drag_c));
                             }
                         }
                         DragTarget::LogArea => {
@@ -2688,16 +2738,19 @@ impl App {
                                 .map(|w| copy_word_label(&w))
                                 .unwrap_or_else(|| "  Copy Word    ".into());
 
+                            let mut ai_items: Vec<String> = Vec::new();
+                            if self.ai_has_selection() {
+                                ai_items.push("  Copy Sel     ".into());
+                            }
+                            ai_items.push("  Copy Line    ".into());
+                            ai_items.push("  Copy View    ".into());
+                            ai_items.push(word_label);
+                            ai_items.push("  Copy All     ".into());
+                            ai_items.push("  Save to File ".into());
                             self.context_menu = Some(ContextMenu {
                                 x: col,
                                 y: row,
-                                items: vec![
-                                    "  Copy Line    ".into(),
-                                    "  Copy View    ".into(),
-                                    word_label,
-                                    "  Copy All     ".into(),
-                                    "  Save to File ".into(),
-                                ],
+                                items: ai_items,
                                 selected: 0,
                                 source: ContextMenuSource::Ai,
                                 line_idx: ai_idx,
@@ -3085,6 +3138,36 @@ impl App {
         }
     }
 
+    fn ai_has_selection(&self) -> bool {
+        match (self.ai_sel_anchor, self.ai_sel_head) {
+            (Some(a), Some(h)) => a != h,
+            _ => false,
+        }
+    }
+
+    fn copy_ai_selection(&self) {
+        let (anchor, head) = match (self.ai_sel_anchor, self.ai_sel_head) {
+            (Some(a), Some(h)) => (a, h),
+            _ => return,
+        };
+        let (r0, c0, r1, c1) = if anchor.0 < head.0 || (anchor.0 == head.0 && anchor.1 <= head.1) {
+            (anchor.0, anchor.1, head.0, head.1)
+        } else {
+            (head.0, head.1, anchor.0, anchor.1)
+        };
+        let mut parts: Vec<String> = Vec::new();
+        for row in r0..=r1 {
+            if let Some(line) = self.ai_output.get(row) {
+                let chars: Vec<char> = line.text.chars().collect();
+                let start = if row == r0 { c0.min(chars.len()) } else { 0 };
+                let end   = if row == r1 { c1.min(chars.len()) } else { chars.len() };
+                let (start, end) = (start.min(end), start.max(end));
+                parts.push(chars[start..end].iter().collect());
+            }
+        }
+        copy_to_clipboard(&parts.join("\n"));
+    }
+
     fn bytecodes_has_selection(&self) -> bool {
         match (self.bytecodes_sel_anchor, self.bytecodes_sel_head) {
             (Some(a), Some(h)) => a != h,
@@ -3285,15 +3368,17 @@ impl App {
     }
 
     fn handle_ai_context_menu(&mut self, item_idx: usize, menu: &ContextMenu) {
-        match item_idx {
-            0 => {
-                // Copy Line
+        let label = menu.items.get(item_idx).map(|s| s.trim()).unwrap_or("");
+        match label {
+            "Copy Sel" => {
+                self.copy_ai_selection();
+            }
+            "Copy Line" => {
                 if let Some(line) = self.ai_output.get(menu.line_idx) {
                     copy_to_clipboard(&line.text);
                 }
             }
-            1 => {
-                // Copy View (visible lines)
+            "Copy View" => {
                 let inner_height = self.layout_geom.as_ref()
                     .map(|g| g.bytecodes_area.height.saturating_sub(2) as usize)
                     .unwrap_or(20);
@@ -3310,24 +3395,14 @@ impl App {
                     .join("\n");
                 copy_to_clipboard(&text);
             }
-            2 => {
-                // Copy Word under cursor
-                if let Some(line) = self.ai_output.get(menu.line_idx) {
-                    if let Some(word) = word_at_col(&line.text, menu.click_col) {
-                        copy_to_clipboard(word);
-                    }
-                }
-            }
-            3 => {
-                // Copy All
+            "Copy All" => {
                 let text: String = self.ai_output.iter()
                     .map(|l| l.text.as_str())
                     .collect::<Vec<_>>()
                     .join("\n");
                 copy_to_clipboard(&text);
             }
-            4 => {
-                // Save to File
+            "Save to File" => {
                 let text: String = self.ai_output.iter()
                     .map(|l| l.text.as_str())
                     .collect::<Vec<_>>()
@@ -3340,7 +3415,14 @@ impl App {
                     Err(e) => self.log_info(&format!("Failed to save: {}", e)),
                 }
             }
-            _ => {}
+            _ => {
+                // Copy Word (dynamic label)
+                if let Some(line) = self.ai_output.get(menu.line_idx) {
+                    if let Some(word) = word_at_col(&line.text, menu.click_col) {
+                        copy_to_clipboard(word);
+                    }
+                }
+            }
         }
     }
 
@@ -5867,8 +5949,10 @@ impl App {
             sig: None,
         });
         self.bytecodes_cursor = None;
-        self.focus = 0;
-        self.left_tab = LeftTab::Bytecodes;
+        if self.ai_state == AiState::Idle {
+            self.focus = 0;
+            self.left_tab = LeftTab::Bytecodes;
+        }
     }
 
     /// Toggle a bookmark at the current bytecodes cursor position (Ctrl+B).
@@ -8005,6 +8089,9 @@ impl App {
         self.ai_mode = mode;
         self.ai_state = AiState::Running;
         self.ai_output.clear();
+        self.ai_line_buf.clear();
+        self.ai_sel_anchor = None;
+        self.ai_sel_head = None;
         self.ai_scroll = 0;
         self.ai_auto_scroll = true;
         self.left_tab = LeftTab::Ai;
@@ -8233,8 +8320,11 @@ impl App {
     fn handle_ai_event(&mut self, evt: AiEvent) {
         match evt {
             AiEvent::TextDelta(text) => {
-                // Split text into lines, wrap long lines at ~114 chars
-                for line in text.lines() {
+                // Accumulate into line buffer; only push complete lines (ending in \n).
+                self.ai_line_buf.push_str(&text);
+                while let Some(nl) = self.ai_line_buf.find('\n') {
+                    let line: String = self.ai_line_buf.drain(..=nl).collect();
+                    let line = line.trim_end_matches('\n');
                     let kind = if line.starts_with("## ") || line.starts_with("# ") {
                         AiLineKind::Header
                     } else {
@@ -8246,7 +8336,6 @@ impl App {
                             text: line.to_string(),
                         });
                     } else {
-                        // Word-wrap long lines
                         for wrapped in wrap_line(line, 114) {
                             self.ai_output.push(AiOutputLine {
                                 kind,
@@ -8323,6 +8412,22 @@ impl App {
                 self.ai_auto_scroll = true;
             }
             AiEvent::Done => {
+                // Flush any remaining partial line
+                if !self.ai_line_buf.is_empty() {
+                    let line = std::mem::take(&mut self.ai_line_buf);
+                    let kind = if line.starts_with("## ") || line.starts_with("# ") {
+                        AiLineKind::Header
+                    } else {
+                        AiLineKind::Text
+                    };
+                    if line.len() <= 114 {
+                        self.ai_output.push(AiOutputLine { kind, text: line });
+                    } else {
+                        for wrapped in wrap_line(&line, 114) {
+                            self.ai_output.push(AiOutputLine { kind, text: wrapped });
+                        }
+                    }
+                }
                 self.ai_state = AiState::Idle;
                 self.ai_output.push(AiOutputLine {
                     kind: AiLineKind::Header,

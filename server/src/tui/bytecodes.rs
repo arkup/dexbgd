@@ -1150,9 +1150,23 @@ fn draw_ai(f: &mut Frame, app: &App, area: Rect, block: ratatui::widgets::Block<
         app.ai_scroll
     };
 
+    // Normalize selection to (r0, c0, r1, c1)
+    let sel: Option<(usize, usize, usize, usize)> =
+        match (app.ai_sel_anchor, app.ai_sel_head) {
+            (Some(a), Some(h)) if a != h => {
+                if a.0 < h.0 || (a.0 == h.0 && a.1 <= h.1) {
+                    Some((a.0, a.1, h.0, h.1))
+                } else {
+                    Some((h.0, h.1, a.0, a.1))
+                }
+            }
+            _ => None,
+        };
+
+    let sel_bg = Color::Rgb(60, 80, 120);
     let mut lines: Vec<Line> = Vec::with_capacity(inner_height);
 
-    for entry in app.ai_output.iter().skip(scroll).take(inner_height) {
+    for (i, entry) in app.ai_output.iter().enumerate().skip(scroll).take(inner_height) {
         let style = match entry.kind {
             AiLineKind::Text => Style::default().fg(t.ui_text),
             AiLineKind::Header => Style::default().fg(t.ui_accent).add_modifier(Modifier::BOLD),
@@ -1160,7 +1174,18 @@ fn draw_ai(f: &mut Frame, app: &App, area: Rect, block: ratatui::widgets::Block<
             AiLineKind::ToolResult => Style::default().fg(Color::Rgb(60, 60, 60)),
             AiLineKind::Error => Style::default().fg(Color::Red),
         };
-        lines.push(Line::from(Span::styled(entry.text.clone(), style)));
+        let spans = if let Some((r0, c0, r1, c1)) = sel {
+            if i >= r0 && i <= r1 {
+                let sel_start = if i == r0 { c0 } else { 0 };
+                let sel_end   = if i == r1 { c1 } else { usize::MAX };
+                apply_sel_to_spans(vec![Span::styled(entry.text.clone(), style)], sel_start, sel_end, sel_bg)
+            } else {
+                vec![Span::styled(entry.text.clone(), style)]
+            }
+        } else {
+            vec![Span::styled(entry.text.clone(), style)]
+        };
+        lines.push(Line::from(spans));
     }
 
     let para = Paragraph::new(lines).block(block);

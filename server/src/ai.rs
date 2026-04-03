@@ -107,8 +107,8 @@ pub struct AiOutputLine {
 // ---------------------------------------------------------------------------
 
 pub enum TurnResult {
-    /// Model wants to call tools.
-    ToolUse,
+    /// Model wants to call tools. Carries the number of tool_use blocks returned.
+    ToolUse(usize),
     /// Model produced only text (end_turn).
     EndTurn,
 }
@@ -184,7 +184,7 @@ pub fn spawn_ai_thread(
         };
 
         // Run agentic loop
-        run_conversation(&mut *client, mode, &req_rx, &evt_tx, &cancel, config.max_turns);
+        run_conversation(&mut *client, mode, &req_rx, &evt_tx, &cancel, config.max_turns, config.turn_delay_ms);
     });
 }
 
@@ -195,6 +195,7 @@ fn run_conversation(
     evt_tx: &mpsc::Sender<AiEvent>,
     cancel: &std::sync::Arc<AtomicBool>,
     max_turns: usize,
+    turn_delay_ms: u64,
 ) {
     let mut nudge_count = 0u32;
     const MAX_NUDGES: u32 = 3;
@@ -203,6 +204,11 @@ fn run_conversation(
         if cancel.load(Ordering::Relaxed) {
             let _ = evt_tx.send(AiEvent::Error("Cancelled".into()));
             return;
+        }
+
+        // Optional inter-turn delay to avoid rate limits (skip on first turn)
+        if turn > 0 && turn_delay_ms > 0 {
+            std::thread::sleep(Duration::from_millis(turn_delay_ms));
         }
 
         // Send a turn to the LLM
@@ -227,14 +233,12 @@ fn run_conversation(
                 let _ = evt_tx.send(AiEvent::Done);
                 return;
             }
-            Ok(TurnResult::ToolUse) => {
-                // The ClaudeClient already sent ToolCall events.
-                // Now we wait for tool results from the main thread.
-                // The main thread will process ToolCall events and send back ToolResult.
-                // We need to collect all pending tool call results.
-
-                // Wait for tool results (the main thread handles execution)
-                loop {
+            Ok(TurnResult::ToolUse(n)) => {
+                // Wait for exactly n tool results from the main thread.
+                // All results must arrive before the next send_turn so that
+                // every tool_use block has a corresponding tool_result.
+                let mut received = 0;
+                while received < n {
                     if cancel.load(Ordering::Relaxed) {
                         let _ = evt_tx.send(AiEvent::Error("Cancelled".into()));
                         return;
@@ -243,40 +247,14 @@ fn run_conversation(
                     match req_rx.recv_timeout(Duration::from_millis(100)) {
                         Ok(AiRequest::ToolResult { tool_use_id, result }) => {
                             client.add_tool_result(&tool_use_id, &result);
-                            // Drain any additional tool results pending immediately
-                            loop {
-                                match req_rx.try_recv() {
-                                    Ok(AiRequest::ToolResult { tool_use_id, result }) => {
-                                        client.add_tool_result(&tool_use_id, &result);
-                                    }
-                                    Ok(AiRequest::Cancel) => {
-                                        let _ = evt_tx.send(AiEvent::Error("Cancelled".into()));
-                                        return;
-                                    }
-                                    Ok(AiRequest::UserApproval(_)) => {
-                                        // Approval for something, continue
-                                    }
-                                    _ => {
-                                        break;
-                                    }
-                                }
-                            }
-                            break; // Got all results, send next turn
+                            received += 1;
                         }
                         Ok(AiRequest::Cancel) => {
                             let _ = evt_tx.send(AiEvent::Error("Cancelled".into()));
                             return;
                         }
-                        Ok(AiRequest::UserApproval(_)) => {
-                            // Handled by main thread
-                        }
-                        Ok(AiRequest::Start { .. }) => {
-                            // Ignore duplicate starts
-                        }
-                        Err(mpsc::RecvTimeoutError::Timeout) => {
-                            // Keep waiting
-                            continue;
-                        }
+                        Ok(AiRequest::UserApproval(_)) | Ok(AiRequest::Start { .. }) => {}
+                        Err(mpsc::RecvTimeoutError::Timeout) => {}
                         Err(mpsc::RecvTimeoutError::Disconnected) => {
                             return;
                         }

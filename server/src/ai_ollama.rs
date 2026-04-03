@@ -415,7 +415,7 @@ impl LlmClient for OllamaClient {
             }
 
             return if !tc2.is_empty() {
-                Ok(TurnResult::ToolUse)
+                Ok(TurnResult::ToolUse(tc2.len()))
             } else {
                 Ok(TurnResult::EndTurn)
             };
@@ -463,7 +463,7 @@ impl LlmClient for OllamaClient {
         }
 
         if !tool_calls.is_empty() {
-            Ok(TurnResult::ToolUse)
+            Ok(TurnResult::ToolUse(tool_calls.len()))
         } else {
             Ok(TurnResult::EndTurn)
         }

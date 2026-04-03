@@ -71,9 +71,12 @@ backend=claude            # "claude" or "ollama"
 claude_model=claude-sonnet-4-6
 ollama_model=qwen2.5:7b
 max_turns=25              # maximum tool-use rounds per session
+turn_delay_ms=0           # milliseconds to wait between turns (0 = no delay)
 ```
 
 `max_turns` limits runaway sessions. The default of 25 is enough for most tasks.
+
+`turn_delay_ms` adds a pause between turns. Useful if you hit Claude's rate limit (`429 Too Many Requests`). Set to `2000`–`5000` if you see rate limit errors.
 
 ## Example sessions
 

@@ -210,20 +210,35 @@ impl LlmClient for ClaudeClient {
         }
 
         if stop_reason == "tool_use" || !tool_calls.is_empty() {
-            Ok(TurnResult::ToolUse)
+            Ok(TurnResult::ToolUse(tool_calls.len()))
         } else {
             Ok(TurnResult::EndTurn)
         }
     }
 
     fn add_tool_result(&mut self, tool_use_id: &str, result: &str) {
+        let new_block = json!({
+            "type": "tool_result",
+            "tool_use_id": tool_use_id,
+            "content": result,
+        });
+        // Claude API requires all tool_results for a turn in one user message.
+        // If the last message is already a user tool_result batch, append to it.
+        if let Some(last) = self.messages.last_mut() {
+            if last.get("role").and_then(|v| v.as_str()) == Some("user") {
+                if let Some(content) = last.get_mut("content").and_then(|c| c.as_array_mut()) {
+                    if content.iter().any(|b| {
+                        b.get("type").and_then(|t| t.as_str()) == Some("tool_result")
+                    }) {
+                        content.push(new_block);
+                        return;
+                    }
+                }
+            }
+        }
         self.messages.push(json!({
             "role": "user",
-            "content": [{
-                "type": "tool_result",
-                "tool_use_id": tool_use_id,
-                "content": result,
-            }],
+            "content": [new_block],
         }));
     }
 
