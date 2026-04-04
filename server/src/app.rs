@@ -5421,7 +5421,7 @@ impl App {
             || input.starts_with("dis ") || input == "dis"
         {
             let arg = input.splitn(2, ' ').nth(1).unwrap_or("").trim();
-            if arg.eq_ignore_ascii_case("pc") {
+            if arg.eq_ignore_ascii_case("pc") || arg.eq_ignore_ascii_case("here") {
                 self.jump_to_pc();
                 return;
             }
@@ -7303,10 +7303,27 @@ impl App {
     fn jump_to_pc(&mut self) {
         // Scroll to show PC once and stay in manual mode — do NOT enable auto_scroll,
         // which would lock the highlight at the same visual row during stepping.
-        if let Some(loc) = self.current_loc {
-            if let Some(idx) = self.bytecodes.iter().position(|i| i.offset == loc as u32) {
-                self.bytecodes_scroll = idx.saturating_sub(2);
-            }
+        let loc = match self.current_loc { Some(l) => l, None => return };
+
+        // When AI dec is cached for the current method, use AI line space
+        let ai_dec_key = match (&self.current_class, &self.current_method) {
+            (Some(c), Some(m)) => Some(crate::ai_dec_cache::AiDecCache::method_key(c, m)),
+            _ => None,
+        };
+        let ai_idx: Option<usize> = {
+            let ai_lines = ai_dec_key.as_deref().and_then(|k| self.ai_dec_cache.methods.get(k));
+            ai_lines.and_then(|lines| {
+                lines.iter().enumerate()
+                    .filter_map(|(i, l)| l.offset.map(|off| (i, off)))
+                    .filter(|&(_, off)| off <= loc)
+                    .max_by_key(|&(_, off)| off)
+                    .map(|(i, _)| i)
+            })
+        };
+        if let Some(idx) = ai_idx {
+            self.bytecodes_scroll = idx.saturating_sub(2);
+        } else if let Some(idx) = self.bytecodes.iter().position(|i| i.offset == loc as u32) {
+            self.bytecodes_scroll = idx.saturating_sub(2);
         }
     }
 
