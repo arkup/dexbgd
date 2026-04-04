@@ -197,6 +197,42 @@ pub fn all_tools() -> Vec<ToolDef> {
             is_execution: false,
         },
         ToolDef {
+            name: "wait_for_event",
+            description: "Block until the app hits a breakpoint, step, or suspension event, then return the location and locals. Use after continue_app or step_* to wait for execution to pause. Respects 'ai cancel'.",
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "timeout_s": { "type": "integer", "description": "Seconds to wait before giving up (default 30, max 120)" }
+                }
+            }),
+            is_execution: false,
+        },
+        ToolDef {
+            name: "set_local",
+            description: "Set a local variable or register to a new value while suspended at a breakpoint. Use to patch inputs, skip checks, or inject values at runtime.",
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Variable name from get_locals, or register (e.g. 'v3')" },
+                    "value": { "type": "string", "description": "New value: integer, 'true', 'false', or 'null'" }
+                },
+                "required": ["name", "value"]
+            }),
+            is_execution: true,
+        },
+        ToolDef {
+            name: "get_object_fields",
+            description: "Inspect the fields of an object held in a local variable while suspended. Returns class name and all instance field values. Use to read runtime state of complex objects (e.g. cipher keys, URL builders, config objects).",
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Variable name from get_locals, or register (e.g. 'v3')" }
+                },
+                "required": ["name"]
+            }),
+            is_execution: false,
+        },
+        ToolDef {
             name: "follow_method",
             description: "Navigate to a method and return its disassembly plus cached AI decompilation if available. Accepts a full JNI method reference (from dis output) or separate class/method. Use to drill into a method seen in an invoke instruction without manually parsing the JNI signature.",
             parameters: json!({

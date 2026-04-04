@@ -5215,10 +5215,18 @@ impl App {
                 return;
             }
             "procs" | "ps" => {
-                self.do_procs();
+                self.do_procs(None);
                 return;
             }
             _ => {}
+        }
+
+        // ps | grep <pattern>  or  procs | grep <pattern>
+        if let Some(rest) = input.strip_prefix("ps|").or_else(|| input.strip_prefix("ps |"))
+            .or_else(|| input.strip_prefix("procs|")).or_else(|| input.strip_prefix("procs |")) {
+            let pat = rest.trim().strip_prefix("grep").unwrap_or(rest).trim().to_lowercase();
+            self.do_procs(if pat.is_empty() { None } else { Some(&pat) });
+            return;
         }
 
         if input.starts_with("save ") {
@@ -6854,14 +6862,49 @@ impl App {
     // ADB commands: procs, attach, launch
     // -------------------------------------------------------------------
 
-    fn do_procs(&mut self) {
+    fn do_procs(&mut self, filter: Option<&str>) {
         use std::process::Command;
+        use std::collections::HashSet;
         self.log_info("Listing app processes...");
+
+        // Get debuggable PIDs via `adb jdwp` — outputs current debuggable PIDs immediately
+        // then blocks; read for 400ms then kill.
+        let debuggable_pids: HashSet<String> = {
+            use std::io::BufRead;
+            let mut pids = HashSet::new();
+            if let Ok(mut child) = Command::new("adb")
+                .arg("jdwp")
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+            {
+                if let Some(stdout) = child.stdout.take() {
+                    let (tx, rx) = std::sync::mpsc::channel::<String>();
+                    std::thread::spawn(move || {
+                        for line in std::io::BufReader::new(stdout).lines().flatten() {
+                            let _ = tx.send(line);
+                        }
+                    });
+                    let deadline = std::time::Instant::now()
+                        + std::time::Duration::from_millis(400);
+                    while std::time::Instant::now() < deadline {
+                        let rem = deadline.saturating_duration_since(std::time::Instant::now());
+                        match rx.recv_timeout(rem.min(std::time::Duration::from_millis(50))) {
+                            Ok(pid) => { pids.insert(pid.trim().to_string()); }
+                            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                        }
+                    }
+                }
+                let _ = child.kill();
+            }
+            pids
+        };
 
         match Command::new("adb").args(["shell", "ps", "-A"]).output() {
             Ok(output) => {
                 let stdout = String::from_utf8_lossy(&output.stdout);
-                let mut entries: Vec<String> = Vec::new();
+                let mut entries: Vec<(String, bool)> = Vec::new(); // (text, debuggable)
 
                 for line in stdout.lines().skip(1) {
                     let cols: Vec<&str> = line.split_whitespace().collect();
@@ -6871,9 +6914,14 @@ impl App {
                         let pid = cols[1];
                         let name = cols[cols.len() - 1];
 
-                        // Filter to app processes (u0_aXXX user = Android app UIDs)
                         if user.starts_with("u0_a") && !name.contains(':') {
-                            entries.push(format!("  {:>6}  {}", pid, name));
+                            if let Some(pat) = filter {
+                                if !name.to_lowercase().contains(pat) {
+                                    continue;
+                                }
+                            }
+                            let dbg = debuggable_pids.contains(pid);
+                            entries.push((format!("  {:>6}  {}", pid, name), dbg));
                         }
                     }
                 }
@@ -6883,8 +6931,12 @@ impl App {
                 } else {
                     self.log_info(&format!("{} app processes running:", entries.len()));
                     self.log_info(&format!("  {:>6}  {}", "PID", "PACKAGE"));
-                    for e in &entries {
-                        self.log_info(e);
+                    for (text, dbg) in &entries {
+                        if *dbg {
+                            self.log_entry(LogLevel::Debug, text);
+                        } else {
+                            self.log_info(text);
+                        }
                     }
                     self.log_info("Use: attach <package> to inject agent and connect");
                 }
@@ -9057,6 +9109,177 @@ impl App {
                 }
                 self.execute_tool_as_command(&cmd)
             }
+            "wait_for_event" => {
+                let timeout_s = input.get("timeout_s").and_then(|v| v.as_i64())
+                    .unwrap_or(30).max(1).min(120) as u64;
+                let cancel = self.ai_cancel.clone();
+                let rx = self.agent_rx.take();
+                let mut result: Option<String> = None;
+
+                if let Some(ref rx) = rx {
+                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_s);
+                    'wait: loop {
+                        if std::time::Instant::now() >= deadline { break; }
+                        if let Some(ref c) = cancel {
+                            if c.load(std::sync::atomic::Ordering::Relaxed) {
+                                result = Some("Cancelled".into());
+                                break;
+                            }
+                        }
+                        let timeout = std::time::Duration::from_millis(50);
+                        let msg = match rx.recv_timeout(timeout) {
+                            Ok(m) => m,
+                            Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                        };
+                        // Check if this is a suspension event
+                        let suspension = match &msg {
+                            AgentMessage::BpHit { class, method, location, line, .. } => {
+                                Some((class.clone(), method.clone(), *location, *line))
+                            }
+                            AgentMessage::Suspended { class, method, location, line, .. } => {
+                                Some((class.clone(), method.clone(), *location, *line))
+                            }
+                            AgentMessage::StepHit { class, method, location, line, .. } => {
+                                Some((class.clone(), method.clone(), *location, *line))
+                            }
+                            _ => None,
+                        };
+                        if let Some((class, method, location, line)) = suspension {
+                            // Process the message to update app state
+                            self.handle_agent_message(msg);
+                            // auto_refresh() was called inside — wait briefly for LocalsResult
+                            let loc_deadline = std::time::Instant::now() + std::time::Duration::from_millis(800);
+                            while std::time::Instant::now() < loc_deadline {
+                                match rx.recv_timeout(std::time::Duration::from_millis(50)) {
+                                    Ok(AgentMessage::LocalsResult { vars }) => {
+                                        self.locals = vars;
+                                        break;
+                                    }
+                                    Ok(other) => self.agent_pending.push(other),
+                                    Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                                }
+                            }
+                            let cls = short_class(&class);
+                            let loc_str = if line >= 0 {
+                                format!(":{}", line)
+                            } else {
+                                format!(" @{:04x}", location)
+                            };
+                            let mut out = format!("Suspended at {}.{}{}", cls, method, loc_str);
+                            if !self.locals.is_empty() {
+                                out.push_str("\nLocals:");
+                                for l in &self.locals {
+                                    out.push_str(&format!("\n  {} ({}) = {}", l.name, short_type(&l.var_type), l.value));
+                                }
+                            }
+                            result = Some(out);
+                            break 'wait;
+                        } else {
+                            self.agent_pending.push(msg);
+                        }
+                    }
+                } else {
+                    result = Some("wait_for_event: not connected to agent".into());
+                }
+
+                self.agent_rx = rx;
+                result.unwrap_or_else(|| format!("Timed out after {}s — no suspension event", timeout_s))
+            }
+
+            "set_local" => {
+                let name = input.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                let value_str = input.get("value").and_then(|v| v.as_str()).unwrap_or("");
+                if name.is_empty() || value_str.is_empty() {
+                    return "set_local: name and value required".into();
+                }
+                if !matches!(self.state, AppState::Suspended | AppState::Stepping) {
+                    return "set_local: app must be suspended at a breakpoint".into();
+                }
+                // Resolve name -> slot + type_hint
+                let slot_str = name.strip_prefix('v').unwrap_or(name);
+                let (slot, type_hint) = if let Ok(s) = slot_str.parse::<i32>() {
+                    // Direct slot number — look up type from locals
+                    let th = self.locals.iter().find(|l| l.slot == s)
+                        .map(|l| type_hint_from_local(&l.var_type))
+                        .unwrap_or_else(|| "I".into());
+                    (s, th)
+                } else {
+                    // Name lookup
+                    match self.locals.iter().find(|l| l.name == name) {
+                        Some(l) => (l.slot, type_hint_from_local(&l.var_type)),
+                        None => return format!("set_local: variable '{}' not found in locals", name),
+                    }
+                };
+                let value: i64 = match value_str {
+                    "true"  => 1,
+                    "false" => 0,
+                    "null"  => 0,
+                    s => match s.parse::<i64>() {
+                        Ok(v) => v,
+                        Err(_) => return format!("set_local: cannot parse value '{}' as integer", s),
+                    }
+                };
+                self.send_command(OutboundCommand::SetLocal { slot, value, type_hint: Some(type_hint.clone()) });
+                self.send_command(OutboundCommand::Locals {});
+                format!("Set v{} ({}) = {} [type: {}]", slot, name, value_str, type_hint)
+            }
+
+            "get_object_fields" => {
+                let name = input.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                if name.is_empty() {
+                    return "get_object_fields: name or register required".into();
+                }
+                if !matches!(self.state, AppState::Suspended | AppState::Stepping) {
+                    return "get_object_fields: app must be suspended at a breakpoint".into();
+                }
+                // Resolve name -> slot
+                let slot_str = name.strip_prefix('v').unwrap_or(name);
+                let slot = if let Ok(s) = slot_str.parse::<i32>() {
+                    s
+                } else {
+                    match self.locals.iter().find(|l| l.name == name) {
+                        Some(l) => l.slot,
+                        None => return format!("get_object_fields: variable '{}' not found in locals", name),
+                    }
+                };
+                // Send inspect command and poll for result
+                self.send_command(OutboundCommand::Inspect { slot, depth: Some(0) });
+                let rx = self.agent_rx.take();
+                let mut result: Option<String> = None;
+                if let Some(ref rx) = rx {
+                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+                    while std::time::Instant::now() < deadline {
+                        let timeout = deadline.saturating_duration_since(std::time::Instant::now())
+                            .min(std::time::Duration::from_millis(50));
+                        match rx.recv_timeout(timeout) {
+                            Ok(AgentMessage::InspectResult { class, slot: _, fields }) => {
+                                let cls = short_class(&class);
+                                if fields.is_empty() {
+                                    result = Some(format!("{} has no readable fields", cls));
+                                } else {
+                                    let mut out = format!("{} ({} fields):\n", cls, fields.len());
+                                    for f in &fields {
+                                        let t = short_type(&f.field_type);
+                                        out.push_str(&format!("  {}: {} = {}\n", f.name, t, f.value));
+                                    }
+                                    result = Some(out);
+                                }
+                                break;
+                            }
+                            Ok(other) => self.agent_pending.push(other),
+                            Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                        }
+                    }
+                }
+                self.agent_rx = rx;
+                result.unwrap_or_else(|| format!(
+                    "get_object_fields: timed out waiting for result for '{}' (slot {})", name, slot
+                ))
+            }
+
             "get_heap_instances" => {
                 let class = input.get("class").and_then(|v| v.as_str()).unwrap_or("");
                 if class.is_empty() {
@@ -9260,6 +9483,16 @@ impl App {
     fn log_agent(&mut self, text: &str) { self.log_entry(LogLevel::Agent, text); }
     fn log_exception(&mut self, text: &str) { self.log_entry(LogLevel::Exception, text); }
     fn log_call(&mut self, text: &str) { self.log_entry(LogLevel::Call, text); }
+}
+
+/// Map a JNI type string to the type_hint char expected by SetLocal.
+fn type_hint_from_local(var_type: &str) -> String {
+    match var_type {
+        "long"   | "J" => "J",
+        "float"  | "F" => "F",
+        "double" | "D" => "D",
+        _ => "I",
+    }.to_string()
 }
 
 /// Convert a class name to JNI signature form.
