@@ -157,6 +157,32 @@ pub fn all_tools() -> Vec<ToolDef> {
             }),
             is_execution: false,
         },
+        ToolDef {
+            name: "get_ai_dec",
+            description: "Get the cached AI-decompiled pseudo-Java source for a method. Returns the decompiled text if available, or instructs to run 'aidec' first. Use after aidec to read the decompiled source for deeper analysis without re-decompiling.",
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "class": { "type": "string", "description": "Class name or JNI signature (e.g. 'com.test.Foo' or 'Lcom/test/Foo;')" },
+                    "method": { "type": "string", "description": "Method name" }
+                },
+                "required": ["class", "method"]
+            }),
+            is_execution: false,
+        },
+        ToolDef {
+            name: "get_xref_callers",
+            description: "Find all methods that call a specific method by scanning DEX bytecodes for invoke instructions. Useful for finding what calls a suspicious API (e.g. who calls Runtime.exec or Cipher.doFinal).",
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "class": { "type": "string", "description": "Target class (e.g. 'android.os.Debug' or 'Lcom/foo/Bar;')" },
+                    "method": { "type": "string", "description": "Target method name (e.g. 'isDebuggerConnected')" }
+                },
+                "required": ["class", "method"]
+            }),
+            is_execution: false,
+        },
 
         // ---------------------------------------------------------------
         // Execution tools (9)  - gated by mode

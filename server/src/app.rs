@@ -9053,6 +9053,63 @@ impl App {
                 }
                 self.execute_tool_as_command(&cmd)
             }
+            "get_ai_dec" => {
+                let class = input.get("class").and_then(|v| v.as_str()).unwrap_or("");
+                let method = input.get("method").and_then(|v| v.as_str()).unwrap_or("");
+                // Normalize class to JNI sig: "com.test.Foo" -> "Lcom/test/Foo;"
+                let jni_class = to_jni_class(class);
+                let key = crate::ai_dec_cache::AiDecCache::method_key(&jni_class, method);
+                if let Some(lines) = self.ai_dec_cache.methods.get(&key) {
+                    let mut out = format!("// Decompiled: {}.{}\n", short_class(&jni_class), method);
+                    for line in lines {
+                        out.push_str(&line.text);
+                        out.push('\n');
+                    }
+                    out
+                } else {
+                    format!(
+                        "No AI decompilation cached for {}.{}. Run: aidec {} {}",
+                        short_class(&jni_class), method, class, method
+                    )
+                }
+            }
+            "get_xref_callers" => {
+                let class = input.get("class").and_then(|v| v.as_str()).unwrap_or("");
+                let method = input.get("method").and_then(|v| v.as_str()).unwrap_or("");
+                if self.dex_data.is_empty() {
+                    return "No DEX data loaded".into();
+                }
+                let jni_class = to_jni_class(class);
+                let timeout = std::time::Duration::from_secs(5);
+                let mut all_callers: Vec<(String, String, String)> = Vec::new();
+                let mut timed_out = false;
+                for dex in &self.dex_data {
+                    let (callers, to) = crate::dex_parser::find_method_callers(dex, &jni_class, method, timeout);
+                    for c in callers {
+                        if !all_callers.contains(&c) {
+                            all_callers.push(c);
+                        }
+                    }
+                    if to { timed_out = true; }
+                }
+                if all_callers.is_empty() {
+                    format!("No callers found for {}.{}", short_class(&jni_class), method)
+                } else {
+                    let mut out = format!(
+                        "{} caller(s) of {}.{}{}:\n",
+                        all_callers.len(),
+                        short_class(&jni_class),
+                        method,
+                        if timed_out { " (scan timed out - partial results)" } else { "" }
+                    );
+                    for (cls, meth, proto) in &all_callers {
+                        let short = short_class(cls);
+                        let proto_short = crate::commands::short_proto(proto);
+                        out.push_str(&format!("  {}.{}{}\n", short, meth, proto_short));
+                    }
+                    out
+                }
+            }
             _ => format!("Unknown tool: {}", name),
         }
     }
@@ -9096,6 +9153,16 @@ impl App {
     fn log_agent(&mut self, text: &str) { self.log_entry(LogLevel::Agent, text); }
     fn log_exception(&mut self, text: &str) { self.log_entry(LogLevel::Exception, text); }
     fn log_call(&mut self, text: &str) { self.log_entry(LogLevel::Call, text); }
+}
+
+/// Convert a class name to JNI signature form.
+/// "com.test.Foo" -> "Lcom/test/Foo;"  (already "Lx;" form is returned as-is)
+fn to_jni_class(class: &str) -> String {
+    if class.starts_with('L') && class.ends_with(';') {
+        class.to_string()
+    } else {
+        format!("L{};", class.replace('.', "/"))
+    }
 }
 
 fn format_log_entry(entry: &LogEntry) -> String {
