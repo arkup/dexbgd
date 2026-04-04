@@ -472,7 +472,7 @@ Works for most apps. Resigning breaks the original signature, so apps with signa
 
 **If single-stepping stalls or step events stop firing (Android 14+):**
 
-ART JIT-compiles methods at runtime; JVMTI step events only fire in interpreted mode. `deopt all` attempts to force interpreted mode via `RetransformClasses` but ART re-JITs methods within milliseconds. The only reliable fix is to disable JIT for the session:
+ART JIT-compiles methods at runtime; JVMTI step events only fire in interpreted mode. The only reliable fix is to disable JIT for the session:
 
 ```bash
 adb shell
