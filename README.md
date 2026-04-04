@@ -470,6 +470,27 @@ JVMTI requires `android:debuggable="true"`, which production apps omit. Two appr
 
 Works for most apps. Resigning breaks the original signature, so apps with signature verification will detect the modification. On repacked APKs, use `bp2` instead of `bp` if breakpoints set but never fire — see [Breakpoints](#breakpoints) for details.
 
+**If single-stepping stalls or step events stop firing (Android 14+):**
+
+ART JIT-compiles methods at runtime; JVMTI step events only fire in interpreted mode. `deopt all` attempts to force interpreted mode via `RetransformClasses` but ART re-JITs methods within milliseconds. The only reliable fix is to disable JIT for the session:
+
+```bash
+adb shell
+su
+setprop dalvik.vm.usejit false
+stop
+start
+```
+
+Wait ~15 seconds for Zygote to restart, then relaunch the app and reattach. The setting is volatile — it resets automatically on reboot. To restore early:
+
+```bash
+su
+setprop dalvik.vm.usejit true
+stop
+start
+```
+
 **Automated (recommended):**
 ```bash
 # Build agent first
