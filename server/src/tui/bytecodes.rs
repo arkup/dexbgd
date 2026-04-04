@@ -731,19 +731,30 @@ fn draw_ai_decompiler(
             } else { false }
         } else { false };
 
+        // is_inner: PC is on this line but past its primary offset (mid-line step)
+        let is_inner = is_current && match (app.current_loc, ai_line.offset) {
+            (Some(loc), Some(off)) => loc > off,
+            _ => false,
+        };
+
         let marker = if has_bp && is_current { "\u{25cf}\u{25ba}" }
             else if has_bp { "\u{25cf} " }
             else if is_current { " \u{25ba}" }
             else { "  " };
 
-        let offset_str = match ai_line.offset {
-            Some(off) => format!("{:04x} ", off),
-            None => "     ".to_string(),
+        // When stepping inside a line, show the actual PC offset so it changes every step
+        let offset_str = if is_inner {
+            format!("{:04x}+", app.current_loc.unwrap() as u32 & 0xffff)
+        } else {
+            match ai_line.offset {
+                Some(off) => format!("{:04x} ", off),
+                None => "     ".to_string(),
+            }
         };
 
         const PREFIX_LEN: usize = 2 + 5; // marker(2) + offset(5)
 
-        let line_bg = if is_current { t.ui_current_bg } else { t.ui_bg };
+        let line_bg = if is_inner { t.ui_step_bg } else if is_current { t.ui_current_bg } else { t.ui_bg };
 
         let text_spans = highlight_java_line(&ai_line.text, t);
 
@@ -771,7 +782,7 @@ fn draw_ai_decompiler(
 
         let mut spans: Vec<Span<'static>> = vec![
             Span::styled(marker.to_string(), if is_current { Style::default().fg(t.ui_accent).bg(line_bg) } else { Style::default().fg(t.ui_dim) }),
-            Span::styled(offset_str, Style::default().fg(t.ui_dim).bg(line_bg)),
+            Span::styled(offset_str, if is_inner { Style::default().fg(t.ui_accent).bg(line_bg) } else { Style::default().fg(t.ui_dim).bg(line_bg) }),
         ];
         spans.extend(text_spans);
 

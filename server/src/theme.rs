@@ -37,8 +37,10 @@ pub struct Theme {
     pub ui_value: Color,
     /// Cursor-selected line background
     pub ui_cursor_bg: Color,
-    /// Current execution line background
+    /// Current execution line background (PC exactly at line's primary offset)
     pub ui_current_bg: Color,
+    /// Step-inside background: PC is within a line but past its primary offset
+    pub ui_step_bg: Color,
     /// Word-highlight background (click-to-highlight)
     pub ui_highlight_bg: Color,
     /// Breakpoint marker color
@@ -78,6 +80,7 @@ pub fn dark() -> Theme {
         ui_value: Color::Yellow,
         ui_cursor_bg: Color::Rgb(50, 50, 70),
         ui_current_bg: Color::Rgb(40, 40, 60),
+        ui_step_bg: Color::Rgb(20, 20, 40),
         ui_highlight_bg: Color::Rgb(80, 70, 20),
         ui_breakpoint: Color::Red,
         ui_bg: Color::Black,
@@ -105,6 +108,7 @@ pub fn solarized() -> Theme {
         ui_value: Color::Rgb(181, 137, 0),       // yellow
         ui_cursor_bg: Color::Rgb(7, 54, 66),     // base02
         ui_current_bg: Color::Rgb(0, 80, 102),   // brighter teal, visible against base03
+        ui_step_bg: Color::Rgb(0, 60, 78),       // halfway between ui_bg and ui_current_bg
         ui_highlight_bg: Color::Rgb(40, 60, 50),
         ui_breakpoint: Color::Rgb(220, 50, 47),  // red
         ui_bg: Color::Rgb(0, 43, 54),             // base03 #002b36
@@ -132,6 +136,7 @@ pub fn one_light() -> Theme {
         ui_value:       Color::Rgb(152, 104, 1),  // hue-6  orange-brown #986801
         ui_cursor_bg:   Color::Rgb(208, 208, 213),// subtle selection
         ui_current_bg:  Color::Rgb(222, 222, 225),// slightly off-white
+        ui_step_bg:     Color::Rgb(215, 215, 220),// between ui_bg and ui_current_bg
         ui_highlight_bg:Color::Rgb(245, 233, 158),// soft yellow highlight
         ui_breakpoint:  Color::Rgb(228, 86, 73),  // hue-5  red    #E45649
         ui_bg:          Color::Rgb(238, 238, 236),// warm off-white, easier on eyes
