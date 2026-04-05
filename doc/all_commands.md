@@ -68,6 +68,10 @@ sout / finish / F9               Step out (single-step based)
 sout2                            Step out via FramePop (faster, no single-step)
 use sout2                        Make F9/sout use the FramePop variant
 use sout                         Revert F9/sout to single-step variant
+use stepto                       Make F8/s use BP-based StepTo (works in AOT/JIT compiled code;
+                                 try this when single-step gets stuck on invoke instructions)
+use singlestep                   [default] Revert F8/s to SINGLE_STEP step-over; may get stuck
+                                 stepping through AOT/JIT compiled invoke instructions
 pause [thread]                   Suspend thread (like Ctrl+C)
 fr <val>                         ForceEarlyReturn with value
                                  val: true | false | void | null | <int>

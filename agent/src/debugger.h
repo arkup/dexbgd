@@ -95,6 +95,11 @@ struct DebuggerState {
     jthread step_thread;
     int step_target_depth;
 
+    // Temporary BP for step_to: method+location set when a step_to BP is active.
+    // OnBreakpoint checks these to treat the hit as a step_hit instead of bp_hit.
+    jmethodID step_bp_method;
+    jlocation step_bp_location;
+
     // Is a thread currently suspended in DebuggerCommandLoop?
     std::atomic<bool> thread_suspended;
 

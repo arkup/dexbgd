@@ -477,6 +477,15 @@ pub enum OutboundCommand {
     #[serde(rename = "step_over")]
     StepOver {},
 
+    /// BP-based step-over: set a breakpoint at `location` in the frame at `depth`
+    /// (0 = current frame, 1 = caller) and resume. Agent reports step_hit when it fires.
+    #[serde(rename = "step_to")]
+    StepTo {
+        location: i64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        depth: Option<i32>,
+    },
+
     #[serde(rename = "step_out")]
     StepOut {},
 

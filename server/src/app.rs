@@ -586,6 +586,13 @@ pub struct App {
     /// When true, F9/sout/finish use sout2 instead of single-step step-out.
     pub use_sout2: bool,
 
+    /// When true, F8/s uses BP-based StepTo instead of SINGLE_STEP step-over.
+    pub use_stepto: bool,
+
+    /// Phase 3 two-phase step-over: stores next_loc in caller while waiting
+    /// for the silent step-into to land at callee offset 0.
+    pub step_over_p1: Option<i64>,
+
     // Color theme (Ctrl+T to cycle)
     pub theme: Theme,
     pub theme_index: usize,
@@ -775,6 +782,8 @@ impl App {
             cap_frame_pop: false,
             cap_redefine_classes: false,
             use_sout2: false,
+            use_stepto: false,
+            step_over_p1: None,
             theme_index: config.theme_index.min(crate::theme::builtin_themes().len().saturating_sub(1)),
             themes: crate::theme::builtin_themes(),
             theme: {
@@ -1082,23 +1091,30 @@ impl App {
                             }
                         } else if self.bytecodes_auto_scroll {
                             // Show 2 lines before current PC, then lock to manual scroll.
-                            // When AI dec is cached for this method, use AI line space;
-                            // otherwise fall back to raw bytecode index.
-                            let ai_dec_key = crate::ai_dec_cache::AiDecCache::method_key(&class, &method);
-                            let ai_scroll: Option<usize> = {
-                                let ai_lines = self.ai_dec_cache.methods.get(&ai_dec_key);
-                                ai_lines.and_then(|lines| {
-                                    current_loc.and_then(|loc| {
-                                        lines.iter().enumerate()
-                                            .filter_map(|(i, l)| l.offset.map(|off| (i, off)))
-                                            .filter(|&(_, off)| off <= loc)
-                                            .max_by_key(|&(_, off)| off)
-                                            .map(|(i, _)| i)
+                            // bytecodes_scroll is an AI lines index in Decompiler/AI-dec mode
+                            // and a raw bytecodes index in Bytecodes mode.
+                            let scroll = if self.left_tab == LeftTab::Decompiler {
+                                let ai_dec_key = crate::ai_dec_cache::AiDecCache::method_key(&class, &method);
+                                let ai_scroll: Option<usize> = {
+                                    let ai_lines = self.ai_dec_cache.methods.get(&ai_dec_key);
+                                    ai_lines.and_then(|lines| {
+                                        current_loc.and_then(|loc| {
+                                            lines.iter().enumerate()
+                                                .filter_map(|(i, l)| l.offset.map(|off| (i, off)))
+                                                .filter(|&(_, off)| off <= loc)
+                                                .max_by_key(|&(_, off)| off)
+                                                .map(|(i, _)| i)
+                                        })
                                     })
-                                })
-                            };
-                            let scroll = if let Some(ai_idx) = ai_scroll {
-                                ai_idx.saturating_sub(2)
+                                };
+                                if let Some(ai_idx) = ai_scroll {
+                                    ai_idx.saturating_sub(2)
+                                } else {
+                                    current_loc
+                                        .and_then(|loc| self.bytecodes.iter().position(|i| i.offset == loc as u32))
+                                        .map(|idx| idx.saturating_sub(2))
+                                        .unwrap_or(0)
+                                }
                             } else {
                                 current_loc
                                     .and_then(|loc| self.bytecodes.iter().position(|i| i.offset == loc as u32))
@@ -1364,6 +1380,18 @@ impl App {
             }
 
             AgentMessage::StepHit { class, method, sig: _, location, line } => {
+                // Phase 3: silently intercept the intermediate step-into landing.
+                // step_over_p1 is set when F8 was pressed on an invoke instruction.
+                // The first step_hit is the callee at offset 0 — swallow it and
+                // send phase 2 (SetBreakpoint in caller frame at next_loc).
+                if let Some(next_loc) = self.step_over_p1.take() {
+                    self.send_command(OutboundCommand::StepTo { location: next_loc, depth: Some(1) });
+                    // Stay in Stepping; reset timeout from now.
+                    self.state = AppState::Stepping;
+                    self.stepping_since = Some(std::time::Instant::now());
+                    return;
+                }
+
                 self.state = AppState::Suspended;
                 self.stepping_quiet = true;
 
@@ -1432,7 +1460,7 @@ impl App {
                     self.send_command(OutboundCommand::Regs {});
                     self.send_command(OutboundCommand::Stack {});
                 } else {
-                    // New method — full refresh (sends Dis + Locals + Regs + Stack)
+                    // New method (or bytecodes empty) — full refresh
                     self.auto_refresh();
                 }
             }
@@ -5082,8 +5110,26 @@ impl App {
         }
     }
 
-    /// Scroll the Decompiler view by `delta` decompiled lines (skips noise instructions).
+    /// Scroll the Decompiler view by `delta` decompiled lines.
+    /// When AI dec is active, bytecodes_scroll is an AI lines index.
+    /// When primitive decompiler is active, bytecodes_scroll is a raw bytecodes index.
     fn scroll_decompiler(&mut self, delta: i32) {
+        // Check if AI dec is active for the current method
+        let ai_len: Option<usize> = {
+            let key = match (&self.current_class, &self.current_method) {
+                (Some(c), Some(m)) => crate::ai_dec_cache::AiDecCache::method_key(c, m),
+                _ => String::new(),
+            };
+            self.ai_dec_cache.methods.get(&key).map(|l| l.len())
+        };
+        if let Some(len) = ai_len {
+            if len > 0 {
+                let clamped = self.bytecodes_scroll.min(len.saturating_sub(1));
+                self.bytecodes_scroll = apply_scroll(clamped, delta, len);
+            }
+            return;
+        }
+        // Primitive decompiler: translate raw bytecodes index via noise filtering.
         use crate::tui::bytecodes::is_decompiler_noise;
         let dec_len = self.bytecodes.iter()
             .filter(|i| !is_decompiler_noise(&i.text))
@@ -5187,6 +5233,16 @@ impl App {
             "use sout" => {
                 self.use_sout2 = false;
                 self.log_info("sout2 disabled: F9/sout uses single-step step-out");
+                return;
+            }
+            "use stepto" => {
+                self.use_stepto = true;
+                self.log_info("stepto enabled: F8/s uses BP-based StepTo");
+                return;
+            }
+            "use singlestep" => {
+                self.use_stepto = false;
+                self.log_info("singlestep enabled: F8/s uses SINGLE_STEP step-over");
                 return;
             }
             "quit" | "q" | "exit" => {
@@ -5894,11 +5950,63 @@ impl App {
             return;
         }
 
+        // BP-based step-over (use stepto mode)
+        if self.use_stepto && matches!(input, "s" | "so" | "step_over" | "n" | "next") {
+            if self.state != AppState::Suspended {
+                // Silently ignore rapid F8 presses while a step is already in-flight.
+                // Only log if the thread is genuinely running (not mid-step).
+                if self.state != AppState::Stepping {
+                    self.log_error("Not suspended.");
+                }
+                return;
+            }
+            if let (Some(loc), false) = (self.current_loc, self.bytecodes.is_empty()) {
+                // Find the instruction immediately after the current PC
+                let next = self.bytecodes.iter()
+                    .find(|i| i.offset as i64 > loc)
+                    .map(|i| i.offset as i64);
+                if let Some(next_loc) = next {
+                    // Detect invoke-* instruction — needs two-phase step-over (Phase 3)
+                    let is_invoke = self.bytecodes.iter()
+                        .find(|i| i.offset as i64 == loc)
+                        .map(|i| i.method_idx.is_some())
+                        .unwrap_or(false);
+                    if is_invoke {
+                        self.step_over_p1 = Some(next_loc);
+                        self.send_command(OutboundCommand::StepInto {});
+                    } else {
+                        // Non-invoke: use STEP_OVER directly, same as singlestep.
+                        // Attempting SetBreakpoint on an opaque compiled frame (err=40)
+                        // interferes with the subsequent SINGLE_STEP fallback.
+                        self.send_command(OutboundCommand::StepOver {});
+                    }
+                    // Transition to Stepping immediately so a rapid F8 press is blocked
+                    // before the agent's "stepping" acknowledgement arrives.
+                    self.state = AppState::Stepping;
+                    self.stepping_since = Some(std::time::Instant::now());
+                    return;
+                }
+            }
+            // Fallback: last instruction or no bytecodes — use regular step_over
+            self.send_command(OutboundCommand::StepOver {});
+            self.state = AppState::Stepping;
+            self.stepping_since = Some(std::time::Instant::now());
+            return;
+        }
+
         // Parse as agent command
         match commands::parse_command(input) {
             Ok(cmd) => {
                 if self.state == AppState::Disconnected {
                     self.log_error("Not connected. Use 'connect' first.");
+                    return;
+                }
+                // Silently drop step commands that arrive while already stepping
+                // (rapid F8/F7 presses queued before the step_hit arrives).
+                let is_step = matches!(cmd,
+                    OutboundCommand::StepOver {} | OutboundCommand::StepInto {}
+                    | OutboundCommand::StepOut {});
+                if is_step && self.state == AppState::Stepping {
                     return;
                 }
                 self.send_command(cmd);
@@ -6359,6 +6467,7 @@ impl App {
                 "# anti com.example.License check true".to_string(),
             ],
             excp_mutes: self.excp_mutes.keys().cloned().collect(),
+            use_stepto: self.use_stepto,
         };
         match session.save(&pkg) {
             Ok(path) => self.log_info(&format!("Session saved: {}", path.display())),
@@ -6398,6 +6507,7 @@ impl App {
         }).collect();
         self.hooks = session.hooks.clone();
         self.excp_mutes = session.excp_mutes.into_iter().map(|p| (p, 0u32)).collect();
+        self.use_stepto = session.use_stepto;
 
         // Re-apply hooks as breakpoints with actions
         for hook in &session.hooks {
@@ -7400,24 +7510,30 @@ impl App {
         // which would lock the highlight at the same visual row during stepping.
         let loc = match self.current_loc { Some(l) => l, None => return };
 
-        // When AI dec is cached for the current method, use AI line space
-        let ai_dec_key = match (&self.current_class, &self.current_method) {
-            (Some(c), Some(m)) => Some(crate::ai_dec_cache::AiDecCache::method_key(c, m)),
-            _ => None,
-        };
-        let ai_idx: Option<usize> = {
-            let ai_lines = ai_dec_key.as_deref().and_then(|k| self.ai_dec_cache.methods.get(k));
-            ai_lines.and_then(|lines| {
-                lines.iter().enumerate()
-                    .filter_map(|(i, l)| l.offset.map(|off| (i, off)))
-                    .filter(|&(_, off)| off <= loc)
-                    .max_by_key(|&(_, off)| off)
-                    .map(|(i, _)| i)
-            })
-        };
-        if let Some(idx) = ai_idx {
-            self.bytecodes_scroll = idx.saturating_sub(2);
-        } else if let Some(idx) = self.bytecodes.iter().position(|i| i.offset == loc as u32) {
+        // bytecodes_scroll is an AI lines index in Decompiler/AI-dec mode, but a raw
+        // bytecodes index in Bytecodes mode — use the right space for the active tab.
+        if self.left_tab == LeftTab::Decompiler {
+            let ai_dec_key = match (&self.current_class, &self.current_method) {
+                (Some(c), Some(m)) => Some(crate::ai_dec_cache::AiDecCache::method_key(c, m)),
+                _ => None,
+            };
+            let ai_idx: Option<usize> = {
+                let ai_lines = ai_dec_key.as_deref().and_then(|k| self.ai_dec_cache.methods.get(k));
+                ai_lines.and_then(|lines| {
+                    lines.iter().enumerate()
+                        .filter_map(|(i, l)| l.offset.map(|off| (i, off)))
+                        .filter(|&(_, off)| off <= loc)
+                        .max_by_key(|&(_, off)| off)
+                        .map(|(i, _)| i)
+                })
+            };
+            if let Some(idx) = ai_idx {
+                self.bytecodes_scroll = idx.saturating_sub(2);
+                return;
+            }
+            // Fall through: AI dec not cached — use raw bytecodes index via offset matching.
+        }
+        if let Some(idx) = self.bytecodes.iter().position(|i| i.offset == loc as u32) {
             self.bytecodes_scroll = idx.saturating_sub(2);
         }
     }

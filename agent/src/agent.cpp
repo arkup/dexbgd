@@ -787,6 +787,17 @@ static void JNICALL OnBreakpoint(
         jthread thread,
         jmethodID method,
         jlocation location) {
+    // Check for temporary step_to BP first (before regular breakpoint lookup).
+    DebuggerState* dbg = GetDebuggerState();
+    if (dbg->step_bp_method == method && dbg->step_bp_location == location
+            && dbg->step_bp_method != nullptr) {
+        ALOGI("[DBG] step_to BP hit at loc=%lld — clearing and reporting as step_hit", (long long)location);
+        jvmti->ClearBreakpoint(method, location);
+        dbg->step_bp_method = nullptr;
+        dbg->step_bp_location = 0;
+        DebuggerCommandLoop(jvmti, jni, thread, method, location, -1);
+        return;
+    }
     int bp_id = FindBreakpointId(method, location);
     if (bp_id < 0) {
         // Unknown breakpoint — should not happen, but don't crash

@@ -3877,6 +3877,77 @@ void DebuggerCommandLoop(jvmtiEnv* jvmti, JNIEnv* jni, jthread thread,
             SendToClient(jb.buf);
             break;
 
+        } else if (strcmp(dcmd.cmd, "step_to") == 0) {
+            if (!g_dbg.cap_breakpoints) {
+                SendError("step_to: breakpoints capability not available");
+                continue;
+            }
+            long long target_loc = 0;
+            json_get_long(dcmd.raw, "location", &target_loc);
+            int depth = 0;
+            json_get_int(dcmd.raw, "depth", &depth);
+
+            // Resolve target method: depth=0 is current frame, depth=1 is caller, etc.
+            jmethodID target_method = method;
+            if (depth > 0) {
+                jmethodID frame_method = nullptr;
+                jlocation frame_loc = 0;
+                jvmtiError ferr = jvmti->GetFrameLocation(thread, depth, &frame_method, &frame_loc);
+                if (ferr != JVMTI_ERROR_NONE || frame_method == nullptr) {
+                    ALOGW("[DBG] step_to: GetFrameLocation(depth=%d) failed (err=%d)", depth, (int)ferr);
+                    // Can't find frame — fall through using current method
+                } else {
+                    target_method = frame_method;
+                }
+                // Caller frame is suspended (waiting for callee to return) — safe to deopt
+                jclass target_class = nullptr;
+                if (jvmti->GetMethodDeclaringClass(target_method, &target_class) == JVMTI_ERROR_NONE
+                        && target_class != nullptr) {
+                    jvmtiError rc_err = jvmti->RetransformClasses(1, &target_class);
+                    ALOGI("[DBG] step_to: RetransformClasses(depth=%d) err=%d", depth, (int)rc_err);
+                    jni->DeleteLocalRef(target_class);
+                }
+            }
+            // depth=0: do NOT call RetransformClasses — invalidating the currently
+            // executing compiled frame while JVMTI-suspended causes ART to misbehave.
+
+            jvmtiError err = jvmti->SetBreakpoint(target_method, (jlocation)target_loc);
+            if (err == JVMTI_ERROR_NONE) {
+                g_dbg.step_bp_method = target_method;
+                g_dbg.step_bp_location = (jlocation)target_loc;
+                jvmti->SetEventNotificationMode(JVMTI_ENABLE, JVMTI_EVENT_BREAKPOINT, nullptr);
+                ALOGI("[DBG] step_to: BP set at loc=%lld depth=%d", (long long)target_loc, depth);
+            } else {
+                // SetBreakpoint failed — fall back to SINGLE_STEP
+                ALOGW("[DBG] step_to: SetBreakpoint failed (err=%d) loc=%lld depth=%d, falling back",
+                      (int)err, (long long)target_loc, depth);
+                if (!g_dbg.cap_single_step) {
+                    SendError("step_to: BP failed and single-step not available");
+                    continue;
+                }
+                jint fc = 0;
+                jvmti->GetFrameCount(thread, &fc);
+                SetStepThread(jni, thread);
+                if (depth > 0) {
+                    // Inside callee — step OUT back to caller level
+                    g_dbg.step_mode = STEP_OUT;
+                    g_dbg.step_target_depth = fc - depth;
+                } else {
+                    // Current frame is an opaque compiled frame — STEP_INTO forces
+                    // global deoptimization (nullptr thread) so the event fires at
+                    // the very next instruction (same method for non-invoke instrs)
+                    g_dbg.step_mode = STEP_INTO;
+                }
+                jvmti->SetEventNotificationMode(JVMTI_ENABLE, JVMTI_EVENT_SINGLE_STEP, nullptr);
+            }
+            JsonBuf jb;
+            json_start(&jb);
+            json_add_string(&jb, "type", "stepping");
+            json_add_string(&jb, "mode", "over");
+            json_end(&jb);
+            SendToClient(jb.buf);
+            break;
+
         } else if (strcmp(dcmd.cmd, "force_return") == 0) {
             if (!g_dbg.cap_force_early_return) {
                 SendError("ForceEarlyReturn not available on this device");
@@ -5262,6 +5333,7 @@ static void DispatchCommand(jvmtiEnv* jvmti, JNIEnv* jni, const char* json) {
     if (strcmp(cmd, "continue") == 0 ||
         strcmp(cmd, "step_into") == 0 ||
         strcmp(cmd, "step_over") == 0 ||
+        strcmp(cmd, "step_to") == 0 ||
         strcmp(cmd, "step_out") == 0 ||
         strcmp(cmd, "step_out2") == 0 ||
         strcmp(cmd, "force_return") == 0 ||

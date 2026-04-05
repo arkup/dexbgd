@@ -35,6 +35,9 @@ pub struct Session {
     /// Exception class name patterns to suppress from the log (lowercased substrings).
     #[serde(default)]
     pub excp_mutes: Vec<String>,
+    /// When true, F8/s uses BP-based StepTo instead of SINGLE_STEP step-over.
+    #[serde(default)]
+    pub use_stepto: bool,
 }
 
 pub fn session_dir() -> Option<PathBuf> {
