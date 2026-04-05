@@ -1383,9 +1383,11 @@ impl App {
                 // Phase 3: silently intercept the intermediate step-into landing.
                 // step_over_p1 is set when F8 was pressed on an invoke instruction.
                 // The first step_hit is the callee at offset 0 — swallow it and
-                // send phase 2 (SetBreakpoint in caller frame at next_loc).
-                if let Some(next_loc) = self.step_over_p1.take() {
-                    self.send_command(OutboundCommand::StepTo { location: next_loc, depth: Some(1) });
+                // send phase 2: step_out from the callee back to the caller.
+                // Using StepOut (not SetBreakpoint) so exceptions in the callee are
+                // handled correctly — StepOut fires on any frame exit, normal or thrown.
+                if self.step_over_p1.take().is_some() {
+                    self.send_command(OutboundCommand::StepOut {});
                     // Stay in Stepping; reset timeout from now.
                     self.state = AppState::Stepping;
                     self.stepping_since = Some(std::time::Instant::now());
